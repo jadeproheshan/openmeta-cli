@@ -388,13 +388,17 @@ export class GitHubService {
             // Default conservative fallback if no headers are provided (60s + slight exponential backoff)
             let delayMs = 60_000 + RATE_LIMIT_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
 
-            if (retryAfterHeader) {
-              delayMs = parseInt(retryAfterHeader, 10) * 1000 + 500;
+            const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : Number.NaN;
+            if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+              delayMs = retryAfterSeconds * 1000 + 500;
             } else if (resetHeader) {
-              const resetTime = parseInt(resetHeader, 10) * 1000;
-              const waitMs = resetTime - Date.now();
-              if (waitMs > 0) {
-                delayMs = waitMs + 500; // Trust GitHub's reset time without arbitrary 60s math.min cap
+              const resetSeconds = parseInt(resetHeader, 10);
+              if (Number.isFinite(resetSeconds)) {
+                const resetTime = resetSeconds * 1000;
+                const waitMs = resetTime - Date.now();
+                if (waitMs > 0) {
+                  delayMs = waitMs + 500; // Trust GitHub's reset time without arbitrary 60s math.min cap
+                }
               }
             }
 

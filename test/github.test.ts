@@ -27,6 +27,8 @@ interface GitHubServiceInternals {
     reason: string;
     rateLimited: boolean;
   }>): string;
+  paginateSearchWithRetry(searchQuery: string): Promise<Array<{ id: number; number: number }>>;
+  delay(ms: number): Promise<void>;
   loadCachedIssues(): GitHubIssue[] | null;
   saveCachedIssues(issues: GitHubIssue[]): void;
   getCachePath(): string;
@@ -53,6 +55,13 @@ function createIssue(overrides: Partial<GitHubIssue> = {}): GitHubIssue {
     labels: issue.labels,
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
+  };
+}
+
+function createSearchItem(id: number): { id: number; number: number } {
+  return {
+    id,
+    number: id,
   };
 }
 
@@ -239,5 +248,131 @@ describe('GitHubService internals', () => {
     expect(cached).toHaveLength(1);
     expect(refreshed).toEqual([]);
     expect(searchCalls).toBe(2);
+  });
+
+  test('falls back to the conservative delay when retry-after is invalid', async () => {
+    const service = new GitHubService();
+    const internals = service as unknown as GitHubServiceInternals;
+    const observedDelays: number[] = [];
+
+    internals.octokit = {
+      rest: {
+        search: {
+          issuesAndPullRequests: async () => ({ data: { total_count: 0, items: [] } }),
+        },
+      },
+      paginate: {
+        iterator: async function* () {
+          throw { status: 403, headers: { 'retry-after': 'not-a-number' } };
+        },
+      },
+    } as unknown as GitHubServiceInternals['octokit'];
+
+    internals.delay = async (ms: number) => {
+      observedDelays.push(ms);
+    };
+
+    await expect(internals.paginateSearchWithRetry('label:"good first issue"')).rejects.toMatchObject({ status: 403 });
+    expect(observedDelays).toEqual([61_000, 62_000]);
+  });
+
+  test('resumes pagination from the next page after a rate limit error', async () => {
+    const service = new GitHubService();
+    const internals = service as unknown as GitHubServiceInternals;
+    const requestedPages: number[] = [];
+
+    internals.octokit = {
+      rest: {
+        search: {
+          issuesAndPullRequests: async () => ({ data: { total_count: 0, items: [] } }),
+        },
+      },
+      paginate: {
+        iterator: async function* (_fn: unknown, params: { page?: number }) {
+          const startPage = params.page ?? 1;
+          requestedPages.push(startPage);
+
+          for (let page = startPage; page <= 4; page++) {
+            if (startPage === 1 && page === 3) {
+              throw { status: 403, headers: { 'retry-after': '0' } };
+            }
+
+            yield {
+              data: [createSearchItem(page)],
+            };
+          }
+        },
+      },
+    } as unknown as GitHubServiceInternals['octokit'];
+
+    internals.delay = async () => {};
+
+    const items = await internals.paginateSearchWithRetry('label:"good first issue"');
+
+    expect(requestedPages).toEqual([1, 3]);
+    expect(items.map((item) => item.id)).toEqual([1, 2, 3, 4]);
+  });
+
+  test('returns partial results when pagination retries are exhausted', async () => {
+    const service = new GitHubService();
+    const internals = service as unknown as GitHubServiceInternals;
+    const requestedPages: number[] = [];
+
+    internals.octokit = {
+      rest: {
+        search: {
+          issuesAndPullRequests: async () => ({ data: { total_count: 0, items: [] } }),
+        },
+      },
+      paginate: {
+        iterator: async function* (_fn: unknown, params: { page?: number }) {
+          requestedPages.push(params.page ?? 1);
+
+          if ((params.page ?? 1) === 1) {
+            yield {
+              data: [createSearchItem(1), createSearchItem(2)],
+            };
+          }
+
+          throw { status: 403, headers: { 'retry-after': '0' } };
+        },
+      },
+    } as unknown as GitHubServiceInternals['octokit'];
+
+    internals.delay = async () => {};
+
+    const items = await internals.paginateSearchWithRetry('label:"good first issue"');
+
+    expect(requestedPages).toEqual([1, 2, 2]);
+    expect(items.map((item) => item.id)).toEqual([1, 2]);
+  });
+
+  test('stops pagination after reaching the configured page cap', async () => {
+    const service = new GitHubService();
+    const internals = service as unknown as GitHubServiceInternals;
+    let pagesYielded = 0;
+
+    internals.octokit = {
+      rest: {
+        search: {
+          issuesAndPullRequests: async () => ({ data: { total_count: 0, items: [] } }),
+        },
+      },
+      paginate: {
+        iterator: async function* () {
+          for (let page = 1; page <= 10; page++) {
+            pagesYielded++;
+            yield {
+              data: [createSearchItem(page)],
+            };
+          }
+        },
+      },
+    } as unknown as GitHubServiceInternals['octokit'];
+
+    const items = await internals.paginateSearchWithRetry('label:"good first issue"');
+
+    expect(pagesYielded).toBe(8);
+    expect(items.map((item) => item.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });
