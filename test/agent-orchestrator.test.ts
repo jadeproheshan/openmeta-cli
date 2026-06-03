@@ -281,6 +281,58 @@ describe('AgentOrchestrator support behavior', () => {
     expect(selected.repoFullName).toBe('acme/two');
   });
 
+  test('promptForIssue warns and retries when numeric fallback points outside the shortlist', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+    const issues = [
+      createRankedIssue({ repoFullName: 'acme/one', number: 1 }),
+      createRankedIssue({ repoFullName: 'acme/two', number: 2 }),
+      createRankedIssue({ repoFullName: 'acme/three', number: 3 }),
+      createRankedIssue({ repoFullName: 'acme/four', number: 4 }),
+      createRankedIssue({ repoFullName: 'acme/five', number: 5 }),
+      createRankedIssue({ repoFullName: 'acme/six', number: 6 }),
+    ];
+
+    spyOn(infra, 'selectPrompt').mockRejectedValue(new Error('tty unavailable'));
+    const promptSpy = spyOn(infra, 'prompt')
+      .mockResolvedValueOnce({ selectedIndex: '6' })
+      .mockResolvedValueOnce({ selectedIndex: '5' });
+    const bannerSpy = spyOn(infra.ui, 'banner').mockImplementation(() => {});
+
+    const selected = await orchestrator.promptForIssue(issues);
+
+    expect(promptSpy).toHaveBeenCalledTimes(2);
+    expect(bannerSpy).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Invalid selection',
+      tone: 'warning',
+    }));
+    expect(selected.repoFullName).toBe('acme/five');
+  });
+
+  test('promptForIssue exposes numeric fallback validation bounds', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
+    const issues = [
+      createRankedIssue({ repoFullName: 'acme/one', number: 1 }),
+      createRankedIssue({ repoFullName: 'acme/two', number: 2 }),
+      createRankedIssue({ repoFullName: 'acme/three', number: 3 }),
+      createRankedIssue({ repoFullName: 'acme/four', number: 4 }),
+      createRankedIssue({ repoFullName: 'acme/five', number: 5 }),
+      createRankedIssue({ repoFullName: 'acme/six', number: 6 }),
+    ];
+
+    spyOn(infra, 'selectPrompt').mockRejectedValue(new Error('tty unavailable'));
+    const promptSpy = spyOn(infra, 'prompt').mockImplementation(async (questions: unknown) => {
+      const [question] = questions as Array<{ validate?: (input: string) => unknown }>;
+      expect(question?.validate?.('6')).toBe('Enter a number between 1 and 5.');
+      expect(question?.validate?.('2')).toBe(true);
+      return { selectedIndex: '2' };
+    });
+
+    const selected = await orchestrator.promptForIssue(issues);
+
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+    expect(selected.repoFullName).toBe('acme/two');
+  });
+
   test('promptForIssue rethrows user cancellation from the interactive selector', async () => {
     const orchestrator = new AgentOrchestrator() as unknown as AgentOrchestratorInternals;
     const issues = [createRankedIssue()];
