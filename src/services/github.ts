@@ -24,8 +24,8 @@ const SEARCH_RESULTS_PER_PAGE = 30;
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_PAGINATION_RETRIES = 3;
 const MAX_SEARCH_PAGES = 4;
-const SEARCH_PAGE_PACING_DELAY_MS = 1_500;
-const RATE_LIMIT_RETRY_BASE_DELAY_MS = 1000;
+const SEARCH_PAGE_PACING_DELAY_MS = 3_000;
+const RATE_LIMIT_RETRY_FALLBACK_DELAY_MS = 10_000;
 
 type SearchIssueItem =
   RestEndpointMethodTypes['search']['issuesAndPullRequests']['response']['data']['items'][number];
@@ -352,32 +352,37 @@ export class GitHubService {
 
     while (attempt < MAX_PAGINATION_RETRIES) {
       try {
-        for await (const response of this.octokit.paginate.iterator(
-          this.octokit.rest.search.issuesAndPullRequests,
-          {
+        while (pagesFetched < MAX_SEARCH_PAGES) {
+          if (pagesFetched > 0) {
+            await this.delay(SEARCH_PAGE_PACING_DELAY_MS);
+          }
+
+          const response = await this.octokit.rest.search.issuesAndPullRequests({
             q: searchQuery,
             sort: 'updated',
             order: 'desc',
             per_page: SEARCH_RESULTS_PER_PAGE,
             page: currentPage,
-          },
-        )) {
-          if (pagesFetched > 0) {
-            await this.delay(SEARCH_PAGE_PACING_DELAY_MS);
-          }
-
-          const pageItems: SearchIssueItem[] = Array.isArray((response as any).data)
-            ? (response as any).data
+          });
+          const pageItems: SearchIssueItem[] = Array.isArray(response.data.items)
+            ? (response.data.items as SearchIssueItem[])
             : [];
+          const totalCount = typeof response.data.total_count === 'number' ? response.data.total_count : 0;
 
           items.push(...pageItems);
           pagesFetched++;
-          currentPage++;
+          const hasMorePages = pageItems.length > 0 && totalCount > pagesFetched * SEARCH_RESULTS_PER_PAGE;
 
           if (pagesFetched >= MAX_SEARCH_PAGES) {
             logger.debug(`Reached page limit (${MAX_SEARCH_PAGES}). Stopping pagination.`);
             return items;
           }
+
+          if (!hasMorePages) {
+            return items;
+          }
+
+          currentPage++;
         }
         return items;
       } catch (error) {
@@ -390,8 +395,8 @@ export class GitHubService {
             const resetHeader = err.headers?.['x-ratelimit-reset'];
             const retryAfterHeader = err.headers?.['retry-after'];
 
-            // Default conservative fallback if no headers are provided (60s + slight exponential backoff)
-            let delayMs = 60_000 + RATE_LIMIT_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+            // Short fallback when GitHub omits retry headers; still grows per attempt.
+            let delayMs = RATE_LIMIT_RETRY_FALLBACK_DELAY_MS + RATE_LIMIT_RETRY_FALLBACK_DELAY_MS * (attempt - 1);
 
             const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : Number.NaN;
             if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
