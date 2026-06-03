@@ -13,6 +13,8 @@ interface AgentRunInternals {
     runChecks?: boolean;
     draftOnly?: boolean;
     refresh?: boolean;
+    repo?: string;
+    issue?: string;
     dryRun?: boolean;
   }): Promise<void>;
   confirmManualHeadlessRun(config: AppConfig): Promise<void>;
@@ -223,6 +225,88 @@ describe('AgentOrchestrator run flow', () => {
       prDraft,
       pullRequestUrl: 'https://github.com/acme/demo/pull/42',
       changedFiles: ['src/app.ts'],
+    }));
+  });
+
+  test('runs against an explicitly targeted issue without discovery selection', async () => {
+    const orchestrator = new AgentOrchestrator() as unknown as AgentRunInternals;
+    const config = createConfig();
+    const issue = createRankedIssue({
+      repoFullName: 'Wei-Shaw/sub2api',
+      repoName: 'sub2api',
+      number: 3014,
+    });
+    const memory = createMemory({ repoFullName: 'Wei-Shaw/sub2api' });
+    const workspace = createWorkspace({
+      workspacePath: '/tmp/openmeta-sub2api',
+      branchName: 'openmeta/3014-openai-compat',
+    });
+    const patchDraft = createPatchDraft();
+    const prDraft = createPullRequestDraft();
+    const artifacts = createArtifacts();
+    const showResultSpy = spyOn(orchestrator as object as { showResult: AgentRunInternals['showResult'] }, 'showResult').mockImplementation(() => {});
+    const loadTargetIssueSpy = spyOn(issueRankingService, 'loadTargetIssue').mockResolvedValue([issue]);
+    const loadRankedIssuesSpy = spyOn(issueRankingService, 'loadRankedIssues').mockResolvedValue([]);
+    const promptForIssueSpy = spyOn(orchestrator as object as { promptForIssue: AgentRunInternals['promptForIssue'] }, 'promptForIssue').mockResolvedValue(issue);
+
+    spyOn(infra.configService, 'get').mockResolvedValue(config);
+    spyOn(orchestrator as object as { initializeClients: AgentRunInternals['initializeClients'] }, 'initializeClients').mockResolvedValue(undefined);
+    spyOn(memoryService, 'load').mockReturnValue(memory);
+    spyOn(workspaceService, 'prepareWorkspace').mockResolvedValue(workspace);
+    spyOn(memoryService, 'update').mockReturnValue(memory);
+    spyOn(llmService, 'generatePatchDraft').mockResolvedValue({
+      version: '1',
+      kind: 'patch_draft',
+      status: 'success',
+      data: patchDraft,
+    });
+    spyOn(orchestrator as object as { generateConcretePatch: AgentRunInternals['generateConcretePatch'] }, 'generateConcretePatch').mockResolvedValue({
+      changedFiles: ['src/openai.ts'],
+      validationResults: [],
+      reviewRequired: false,
+    });
+    spyOn(llmService, 'generatePrDraft').mockResolvedValue({
+      version: '1',
+      kind: 'pull_request_draft',
+      status: 'success',
+      data: prDraft,
+    });
+    spyOn(contentService, 'formatPatchDraftMarkdown').mockReturnValue('# Patch');
+    spyOn(contentService, 'formatPullRequestDraftMarkdown').mockReturnValue('# PR');
+    spyOn(contentService, 'formatContributionDossier').mockReturnValue('# Dossier');
+    spyOn(orchestrator as object as { submitContributionPullRequestIfPossible: AgentRunInternals['submitContributionPullRequestIfPossible'] }, 'submitContributionPullRequestIfPossible')
+      .mockResolvedValue({
+        branchName: 'openmeta/agent-3014',
+        url: 'https://github.com/Wei-Shaw/sub2api/pull/3015',
+        number: 3015,
+        changedFiles: ['src/openai.ts'],
+        validationResults: [],
+      });
+    spyOn(orchestrator as object as { prepareLocalArtifactPaths: AgentRunInternals['prepareLocalArtifactPaths'] }, 'prepareLocalArtifactPaths').mockReturnValue(artifacts);
+    spyOn(orchestrator as object as { writeLocalArtifacts: AgentRunInternals['writeLocalArtifacts'] }, 'writeLocalArtifacts').mockImplementation(() => {});
+    spyOn(orchestrator as object as { publishArtifactsIfNeeded: AgentRunInternals['publishArtifactsIfNeeded'] }, 'publishArtifactsIfNeeded').mockResolvedValue({
+      published: false,
+    });
+    spyOn(inboxService, 'saveItem').mockReturnValue([createInboxItem()]);
+    spyOn(inboxService, 'renderMarkdown').mockReturnValue('# Inbox');
+    spyOn(proofOfWorkService, 'load').mockReturnValue({ records: [] });
+    spyOn(proofOfWorkService, 'renderMarkdown').mockReturnValue('# Proof');
+    spyOn(proofOfWorkService, 'record').mockReturnValue([createProofRecord()]);
+    spyOn(memoryService, 'renderMarkdown').mockReturnValue('# Memory');
+    spyOn(memoryService, 'recordOutcome').mockReturnValue(memory);
+
+    await orchestrator.run({ issue: 'https://github.com/Wei-Shaw/sub2api/issues/3014' });
+
+    expect(loadTargetIssueSpy).toHaveBeenCalledWith(config, {
+      repoFullName: 'Wei-Shaw/sub2api',
+      issueNumber: 3014,
+    });
+    expect(loadRankedIssuesSpy).not.toHaveBeenCalled();
+    expect(promptForIssueSpy).not.toHaveBeenCalled();
+    expect(showResultSpy).toHaveBeenCalledWith(expect.objectContaining({
+      issue,
+      pullRequestUrl: 'https://github.com/Wei-Shaw/sub2api/pull/3015',
+      changedFiles: ['src/openai.ts'],
     }));
   });
 

@@ -24,11 +24,14 @@ interface LLMServiceInternals {
   client: {
     chat: {
       completions: {
-        create: (payload: {
-          model: string;
-          messages: Array<{ role: string; content: string }>;
-          temperature: number;
-        }) => Promise<unknown>;
+          create: (payload: {
+            model: string;
+            messages: Array<{ role: string; content: string }>;
+            temperature: number;
+            reasoning_effort?: string;
+            stream?: boolean;
+            stream_options?: { include_usage?: boolean };
+          }) => unknown | Promise<unknown>;
       };
     };
   } | null;
@@ -252,6 +255,188 @@ describe('LLMService validation behavior', () => {
 
     const valid = await service.validateConnection();
     expect(valid).toBe(true);
+  });
+});
+
+describe('LLMService reasoning effort requests', () => {
+  test('streams chat completions and aggregates content chunks when enabled', async () => {
+    const service = new LLMService() as unknown as LLMServiceInternals & {
+      initialize(
+        apiKey: string,
+        baseUrl: string,
+        modelName?: string,
+        apiHeaders?: Record<string, string>,
+        provider?: 'openai',
+        reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',
+        stream?: boolean,
+      ): void;
+      generateDailyReport(issueAnalysis: string): Promise<string>;
+    };
+    const payloads: Array<Record<string, unknown>> = [];
+
+    async function* streamChunks() {
+      yield { choices: [{ delta: { content: 'hel' } }] };
+      yield { choices: [{ delta: { content: 'lo' } }] };
+      yield { choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };
+    }
+
+    service.initialize('sk-test', 'https://api.openai.com/v1', 'gpt-5.5', {}, 'openai', 'xhigh', true);
+    service.client = {
+      chat: {
+        completions: {
+          create: (payload) => {
+            payloads.push(payload);
+            return streamChunks();
+          },
+        },
+      },
+    };
+
+    const content = await service.generateDailyReport('issue analysis');
+
+    expect(content).toBe('hello');
+    expect(payloads[0]).toMatchObject({
+      model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+      stream: true,
+      stream_options: {
+        include_usage: true,
+      },
+    });
+  });
+
+  test('uses non-streaming chat completions by default', async () => {
+    const service = new LLMService() as unknown as LLMServiceInternals & {
+      initialize(
+        apiKey: string,
+        baseUrl: string,
+        modelName?: string,
+        apiHeaders?: Record<string, string>,
+        provider?: 'openai',
+        reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',
+        stream?: boolean,
+      ): void;
+      generateDailyReport(issueAnalysis: string): Promise<string>;
+    };
+    const payloads: Array<Record<string, unknown>> = [];
+
+    service.initialize('sk-test', 'https://api.openai.com/v1', 'gpt-5.5', {}, 'openai', 'xhigh');
+    service.client = {
+      chat: {
+        completions: {
+          create: async (payload) => {
+            payloads.push(payload);
+            return { choices: [{ message: { content: 'done' } }] };
+          },
+        },
+      },
+    };
+
+    const content = await service.generateDailyReport('issue analysis');
+
+    expect(content).toBe('done');
+    expect(payloads[0]).toMatchObject({
+      model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+    });
+    expect(payloads[0]).not.toHaveProperty('stream');
+    expect(payloads[0]).not.toHaveProperty('stream_options');
+  });
+
+  test('passes configured reasoning effort to chat completions', async () => {
+    const service = new LLMService() as unknown as LLMServiceInternals & {
+      initialize(
+        apiKey: string,
+        baseUrl: string,
+        modelName?: string,
+        apiHeaders?: Record<string, string>,
+        provider?: 'openai',
+        reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',
+      ): void;
+      generateDailyReport(issueAnalysis: string): Promise<string>;
+    };
+    const payloads: unknown[] = [];
+
+    service.initialize('sk-test', 'https://api.openai.com/v1', 'gpt-5.5', {}, 'openai', 'high');
+    service.client = {
+      chat: {
+        completions: {
+          create: async (payload) => {
+            payloads.push(payload);
+            return { choices: [{ message: { content: 'done' } }] };
+          },
+        },
+      },
+    };
+
+    await service.generateDailyReport('issue analysis');
+
+    expect(payloads[0]).toMatchObject({
+      model: 'gpt-5.5',
+      reasoning_effort: 'high',
+    });
+  });
+
+  test('omits reasoning effort for non-reasoning chat models', async () => {
+    const service = new LLMService() as unknown as LLMServiceInternals & {
+      initialize(
+        apiKey: string,
+        baseUrl: string,
+        modelName?: string,
+        apiHeaders?: Record<string, string>,
+        provider?: 'openai',
+        reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',
+      ): void;
+      generateDailyReport(issueAnalysis: string): Promise<string>;
+    };
+    const payloads: Array<Record<string, unknown>> = [];
+
+    service.initialize('sk-test', 'https://api.openai.com/v1', 'gpt-4o-mini', {}, 'openai', 'none');
+    service.client = {
+      chat: {
+        completions: {
+          create: async (payload) => {
+            payloads.push(payload);
+            return { choices: [{ message: { content: 'done' } }] };
+          },
+        },
+      },
+    };
+
+    await service.generateDailyReport('issue analysis');
+
+    expect(payloads[0]).not.toHaveProperty('reasoning_effort');
+  });
+
+  test('omits default reasoning effort for custom legacy models', async () => {
+    const service = new LLMService() as unknown as LLMServiceInternals & {
+      initialize(
+        apiKey: string,
+        baseUrl: string,
+        modelName?: string,
+        apiHeaders?: Record<string, string>,
+        provider?: 'custom',
+        reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',
+      ): void;
+      generateDailyReport(issueAnalysis: string): Promise<string>;
+    };
+    const payloads: Array<Record<string, unknown>> = [];
+
+    service.initialize('sk-test', 'https://example.com/v1', 'legacy-model', {}, 'custom', 'none');
+    service.client = {
+      chat: {
+        completions: {
+          create: async (payload) => {
+            payloads.push(payload);
+            return { choices: [{ message: { content: 'done' } }] };
+          },
+        },
+      },
+    };
+
+    await service.generateDailyReport('issue analysis');
+
+    expect(payloads[0]).not.toHaveProperty('reasoning_effort');
   });
 });
 

@@ -13,6 +13,7 @@ import type {
   GitHubIssue,
   ImplementationDraft,
   LLMProvider,
+  LLMReasoningEffort,
   MatchedIssue,
   RankedIssue,
   RepoFileSnippet,
@@ -47,6 +48,8 @@ export class LLMService {
   private client: OpenAI | null = null;
   private modelName: string = 'gpt-4o-mini';
   private provider: LLMProvider = 'openai';
+  private reasoningEffort: LLMReasoningEffort | undefined;
+  private stream = false;
   private lastValidationError: string | null = null;
 
   initialize(
@@ -55,6 +58,8 @@ export class LLMService {
     modelName?: string,
     apiHeaders?: Record<string, string>,
     provider?: LLMProvider,
+    reasoningEffort?: LLMReasoningEffort,
+    stream?: boolean,
   ): void {
     this.client = new OpenAI({
       apiKey,
@@ -67,6 +72,8 @@ export class LLMService {
     if (provider) {
       this.provider = provider;
     }
+    this.reasoningEffort = reasoningEffort;
+    this.stream = stream === true;
   }
 
   async validateConnection(): Promise<boolean> {
@@ -84,6 +91,7 @@ export class LLMService {
           model: this.modelName,
           messages: [{ role: 'user', content: LLM_VALIDATION_PROMPT }],
           ...LLM_VALIDATION_REQUEST,
+          ...this.getReasoningRequestParams(),
         }, {
           signal: controller.signal,
         });
@@ -282,14 +290,79 @@ Repo Stars: ${i.repoStars}`
           { role: 'user', content: prompt },
         ],
         temperature: options.temperature ?? 0.7,
+        ...(this.stream
+          ? {
+            stream: true,
+            stream_options: {
+              include_usage: true,
+            },
+          }
+          : {}),
+        ...this.getReasoningRequestParams(),
       });
 
-      const content = response.choices[0]?.message?.content || '';
-      return content;
+      return await this.extractChatContent(response);
     } catch (error) {
       logger.debug('LLM chat failed', error);
       throw new Error('The LLM request failed. Please verify your provider, model, and API key.');
     }
+  }
+
+  private async extractChatContent(response: unknown): Promise<string> {
+    if (this.isAsyncIterable(response)) {
+      let content = '';
+
+      for await (const chunk of response) {
+        content += this.extractStreamChunkContent(chunk);
+      }
+
+      return content;
+    }
+
+    return this.extractNonStreamingContent(response);
+  }
+
+  private isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+    return typeof value === 'object' &&
+      value !== null &&
+      Symbol.asyncIterator in value &&
+      typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function';
+  }
+
+  private extractStreamChunkContent(chunk: unknown): string {
+    if (typeof chunk !== 'object' || chunk === null || !('choices' in chunk) || !Array.isArray(chunk.choices)) {
+      return '';
+    }
+
+    const [choice] = chunk.choices;
+    if (typeof choice !== 'object' || choice === null || !('delta' in choice)) {
+      return '';
+    }
+
+    const delta = choice.delta;
+    if (typeof delta !== 'object' || delta === null || !('content' in delta)) {
+      return '';
+    }
+
+    return typeof delta.content === 'string' ? delta.content : '';
+  }
+
+  private extractNonStreamingContent(response: unknown): string {
+    if (typeof response !== 'object' || response === null || !('choices' in response) || !Array.isArray(response.choices)) {
+      return '';
+    }
+
+    const [choice] = response.choices;
+    if (typeof choice !== 'object' || choice === null || !('message' in choice)) {
+      return '';
+    }
+
+    const message = choice.message;
+    if (typeof message !== 'object' || message === null || !('content' in message)) {
+      return '';
+    }
+
+    return typeof message.content === 'string' ? message.content : '';
   }
 
   private async generateStructuredOutput<T>(input: {
@@ -350,6 +423,22 @@ Repo Stars: ${i.repoStars}`
           }];
         }),
     };
+  }
+
+  private getReasoningRequestParams(): { reasoning_effort?: LLMReasoningEffort } {
+    if (!this.reasoningEffort || !this.supportsReasoningEffort()) {
+      return {};
+    }
+
+    return { reasoning_effort: this.reasoningEffort };
+  }
+
+  private supportsReasoningEffort(): boolean {
+    const normalizedModel = this.modelName.toLowerCase();
+    return normalizedModel.startsWith('gpt-5') ||
+      normalizedModel.startsWith('o1') ||
+      normalizedModel.startsWith('o3') ||
+      normalizedModel.startsWith('o4');
   }
 
   private parseImplementationDraft(
