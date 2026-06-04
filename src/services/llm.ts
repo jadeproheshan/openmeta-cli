@@ -4,10 +4,12 @@ import {
   ImplementationDraftEnvelopeSchema,
   IssueMatchListEnvelopeSchema,
   PatchDraftEnvelopeSchema,
+  RepositorySuggestionListEnvelopeSchema,
   type StructuredOutputResult,
   type PatchDraft,
   PullRequestDraftEnvelopeSchema,
   type PullRequestDraft,
+  type RepositoryImprovementSuggestion,
 } from '../contracts/index.js';
 import type {
   GitHubIssue,
@@ -41,6 +43,8 @@ import {
   PATCH_DRAFT_PROMPT,
   PATCH_DRAFT_REPAIR_PROMPT,
   PR_DRAFT_PROMPT,
+  REPOSITORY_ANALYSIS_PROMPT,
+  REPOSITORY_ANALYSIS_REPAIR_PROMPT,
   VALIDATION_REPAIR_PROMPT,
 } from '../infra/prompt-templates.js';
 
@@ -199,6 +203,38 @@ Repo Stars: ${i.repoStars}`
       prompt,
       parser: this.parsePatchDraft.bind(this),
       repairPrompt: PATCH_DRAFT_REPAIR_PROMPT,
+    });
+  }
+
+  async analyzeRepository(
+    repoFullName: string,
+    workspace: RepoWorkspaceContext,
+    memory: RepoMemory,
+  ): Promise<StructuredOutputResult<'repository_suggestion_list', RepositoryImprovementSuggestion[]>> {
+    const repoContext = [
+      `Repository: ${repoFullName}`,
+      `Workspace Path: ${workspace.workspacePath}`,
+      `Default Branch: ${workspace.defaultBranch}`,
+      `Workspace Dirty: ${workspace.workspaceDirty}`,
+      `Top-Level Files: ${workspace.topLevelFiles.join(', ') || 'none'}`,
+      `Candidate Files: ${workspace.candidateFiles.join(', ') || 'none'}`,
+      `Detected Test Commands: ${workspace.testCommands.map((item) => item.command).join(', ') || 'none'}`,
+      `Runnable Validation Commands: ${workspace.validationCommands.map((item) => item.command).join(', ') || 'none'}`,
+      `Validation Safety Notes: ${workspace.validationWarnings.join(' | ') || 'none'}`,
+      'Snippets:',
+      ...workspace.snippets.map((snippet) => `FILE: ${snippet.path}\n${snippet.content}`),
+    ].join('\n\n');
+
+    const prompt = fillPrompt(REPOSITORY_ANALYSIS_PROMPT, {
+      repoContext,
+      repoMemory: this.formatRepoMemory(memory),
+    });
+
+    return this.generateStructuredOutput({
+      prompt,
+      parser: this.parseRepositorySuggestions.bind(this),
+      repairPrompt: REPOSITORY_ANALYSIS_REPAIR_PROMPT,
+      temperature: 0.2,
     });
   }
 
@@ -462,6 +498,19 @@ Repo Stars: ${i.repoStars}`
     content: string,
   ): StructuredOutputResult<'pull_request_draft', PullRequestDraft> {
     return this.parseStructuredJson(content, PullRequestDraftEnvelopeSchema);
+  }
+
+  private parseRepositorySuggestions(
+    content: string,
+  ): StructuredOutputResult<'repository_suggestion_list', RepositoryImprovementSuggestion[]> {
+    const parsed = this.parseStructuredJson(content, RepositorySuggestionListEnvelopeSchema);
+
+    return {
+      version: parsed.version,
+      kind: parsed.kind,
+      status: parsed.status,
+      data: parsed.data.suggestions,
+    };
   }
 
   private parseStructuredJson<T>(content: string, schema: z.ZodType<T>): T {

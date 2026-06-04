@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import * as infra from '../src/infra/index.js';
 import { AgentOrchestrator } from '../src/orchestration/agent.js';
+import { AnalyzeOrchestrator } from '../src/orchestration/analyze.js';
 import { contentService, inboxService, issueRankingService, llmService, memoryService, proofOfWorkService, workspaceService } from '../src/services/index.js';
 import type { AppConfig, ContributionAgentResult, RankedIssue } from '../src/types/index.js';
-import { createInboxItem, createMemory, createPatchDraft, createProofRecord, createPullRequestDraft, createRankedIssue, createWorkspace } from './helpers/factories.js';
+import { createInboxItem, createMemory, createPatchDraft, createProofRecord, createPullRequestDraft, createRankedIssue, createRepositorySuggestion, createWorkspace } from './helpers/factories.js';
 
 interface AgentRunInternals {
   run(options?: {
@@ -43,6 +44,25 @@ interface AgentRunInternals {
   writeLocalArtifacts(input: unknown): void;
   showResult(result: ContributionAgentResult): void;
   showStructuredReviewNotice(input: { title: string; subtitle: string; lines?: string[] }): void;
+}
+
+interface AnalyzeRunInternals {
+  run(options: {
+    repo?: string;
+    headless?: boolean;
+    runChecks?: boolean;
+    dryRun?: boolean;
+  }): Promise<void>;
+  initializeClients(config: AppConfig): Promise<void>;
+  promptForSuggestion<T>(suggestions: T[]): Promise<T>;
+  prepareArtifactPaths(repoFullName: string, suggestionId: string): {
+    artifactDir: string;
+    analysisPath: string;
+    patchDraftPath: string;
+    prDraftPath: string;
+  };
+  writeLocalArtifacts(input: unknown): void;
+  showResult(input: unknown): void;
 }
 
 function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -378,5 +398,100 @@ describe('AgentOrchestrator run flow', () => {
       reviewRequired: true,
     }));
     expect(showResultSpy).toHaveBeenCalled();
+  });
+});
+
+describe('AnalyzeOrchestrator run flow', () => {
+  test('analyzes a repository, selects the top suggestion in headless mode, and writes draft artifacts', async () => {
+    const orchestrator = new AnalyzeOrchestrator() as unknown as AnalyzeRunInternals;
+    const config = createConfig();
+    const workspace = createWorkspace({
+      workspacePath: '/tmp/openmeta-demo',
+      branchName: 'openmeta/analyze-acme-demo',
+      candidateFiles: ['README.md', 'src/index.ts'],
+    });
+    const memory = createMemory({ repoFullName: 'acme/demo' });
+    const topSuggestion = createRepositorySuggestion({
+      id: 'config-validation',
+      title: 'Add config validation tests',
+      summary: 'Cover malformed provider config normalization.',
+      targetFiles: [{ path: 'src/infra/config.ts', reason: 'Normalization logic' }],
+      prPotentialScore: 93,
+    });
+    const lowerSuggestion = createRepositorySuggestion({
+      id: 'docs-install',
+      title: 'Document local install',
+      prPotentialScore: 75,
+    });
+    const patchDraft = createPatchDraft();
+    const prDraft = createPullRequestDraft();
+    const artifacts = {
+      artifactDir: '/tmp/openmeta/artifacts/analyze',
+      analysisPath: '/tmp/openmeta/artifacts/analyze/repository-analysis.md',
+      patchDraftPath: '/tmp/openmeta/artifacts/analyze/patch-draft.md',
+      prDraftPath: '/tmp/openmeta/artifacts/analyze/pr-draft.md',
+    };
+    const writeArtifactsSpy = spyOn(orchestrator as object as { writeLocalArtifacts: AnalyzeRunInternals['writeLocalArtifacts'] }, 'writeLocalArtifacts')
+      .mockImplementation(() => {});
+    const showResultSpy = spyOn(orchestrator as object as { showResult: AnalyzeRunInternals['showResult'] }, 'showResult')
+      .mockImplementation(() => {});
+    const promptForSuggestionSpy = spyOn(orchestrator as object as { promptForSuggestion: AnalyzeRunInternals['promptForSuggestion'] }, 'promptForSuggestion')
+      .mockResolvedValue(lowerSuggestion);
+
+    spyOn(infra.configService, 'get').mockResolvedValue(config);
+    spyOn(orchestrator as object as { initializeClients: AnalyzeRunInternals['initializeClients'] }, 'initializeClients').mockResolvedValue(undefined);
+    spyOn(memoryService, 'load').mockReturnValue(memory);
+    spyOn(workspaceService, 'prepareRepositoryWorkspace').mockResolvedValue(workspace);
+    spyOn(llmService, 'analyzeRepository').mockResolvedValue({
+      version: '1',
+      kind: 'repository_suggestion_list',
+      status: 'success',
+      data: [lowerSuggestion, topSuggestion],
+    });
+    spyOn(llmService, 'generatePatchDraft').mockResolvedValue({
+      version: '1',
+      kind: 'patch_draft',
+      status: 'success',
+      data: patchDraft,
+    });
+    spyOn(llmService, 'generatePrDraft').mockResolvedValue({
+      version: '1',
+      kind: 'pull_request_draft',
+      status: 'success',
+      data: prDraft,
+    });
+    spyOn(contentService, 'formatRepositoryAnalysisMarkdown').mockReturnValue('# Repository Analysis');
+    spyOn(contentService, 'formatPatchDraftMarkdown').mockReturnValue('# Patch');
+    spyOn(contentService, 'formatPullRequestDraftMarkdown').mockReturnValue('# PR');
+    spyOn(orchestrator as object as { prepareArtifactPaths: AnalyzeRunInternals['prepareArtifactPaths'] }, 'prepareArtifactPaths')
+      .mockReturnValue(artifacts);
+
+    await orchestrator.run({ repo: 'https://github.com/acme/demo', headless: true });
+
+    expect(promptForSuggestionSpy).not.toHaveBeenCalled();
+    expect(workspaceService.prepareRepositoryWorkspace).toHaveBeenCalledWith('acme/demo', memory, false, 'headless');
+    expect(llmService.generatePatchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoFullName: 'acme/demo',
+        number: 0,
+        title: 'Add config validation tests',
+        analysis: expect.objectContaining({
+          coreDemand: 'Cover malformed provider config normalization.',
+        }),
+      }),
+      workspace,
+      memory,
+    );
+    expect(writeArtifactsSpy).toHaveBeenCalledWith({
+      artifacts,
+      analysisMarkdown: '# Repository Analysis',
+      patchDraftMarkdown: '# Patch',
+      prDraftMarkdown: '# PR',
+    });
+    expect(showResultSpy).toHaveBeenCalledWith(expect.objectContaining({
+      repoFullName: 'acme/demo',
+      selectedSuggestion: topSuggestion,
+      artifacts,
+    }));
   });
 });

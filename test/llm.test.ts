@@ -21,6 +21,18 @@ interface LLMServiceInternals {
       validationNotes: string[];
     };
   }>;
+  analyzeRepository(
+    repoFullName: string,
+    workspace: ReturnType<typeof createWorkspace>,
+    memory: ReturnType<typeof createMemory>,
+  ): Promise<{
+    status: StructuredOutputStatus;
+    data: Array<{
+      id: string;
+      title: string;
+      prPotentialScore: number;
+    }>;
+  }>;
   client: {
     chat: {
       completions: {
@@ -60,12 +72,191 @@ interface LLMServiceInternals {
       risks: string[];
     };
   };
+  parseRepositorySuggestions(content: string): {
+    status: StructuredOutputStatus;
+    data: Array<{
+      id: string;
+      title: string;
+      summary: string;
+      rationale: string;
+      targetFiles: Array<{ path: string; reason: string }>;
+      proposedChanges: string[];
+      validationPlan: string[];
+      risks: string[];
+      estimatedWorkload: 'small' | 'medium' | 'large';
+      prPotentialScore: number;
+    }>;
+  };
   parseLLMResponse(content: string, originalIssues: ReturnType<typeof createIssue>[]): {
     status: StructuredOutputStatus;
     data: MatchedIssue[];
   };
   formatRepoMemory(memory: ReturnType<typeof createMemory>): string;
 }
+
+describe('LLMService repository suggestion parsing', () => {
+  test('parses structured repository suggestions and keeps the highest scoring duplicate', () => {
+    const service = new LLMService() as unknown as LLMServiceInternals;
+    const suggestions = service.parseRepositorySuggestions(`
+      {
+        "version": "1",
+        "kind": "repository_suggestion_list",
+        "status": "success",
+        "data": {
+          "suggestions": [
+            {
+              "id": "docs-install",
+              "title": "Document the local install path",
+              "summary": "Make setup instructions easier to follow.",
+              "rationale": "The README mentions installation but not local linking.",
+              "targetFiles": [
+                {
+                  "path": "README.md",
+                  "reason": "Primary onboarding documentation"
+                }
+              ],
+              "proposedChanges": ["Add a local install section"],
+              "validationPlan": ["Run the documented command in a clean shell"],
+              "risks": ["Docs may drift if package scripts change"],
+              "estimatedWorkload": "small",
+              "prPotentialScore": 72
+            },
+            {
+              "id": "config-validation",
+              "title": "Add config validation tests",
+              "summary": "Cover malformed provider config normalization.",
+              "rationale": "Config compatibility is a high-impact safety path.",
+              "targetFiles": [
+                {
+                  "path": "src/infra/config.ts",
+                  "reason": "Normalization logic"
+                },
+                {
+                  "path": "test/config.test.ts",
+                  "reason": "Regression coverage"
+                }
+              ],
+              "proposedChanges": ["Add tests for invalid stream and reasoning values"],
+              "validationPlan": ["bun test test/config.test.ts"],
+              "risks": [],
+              "estimatedWorkload": "medium",
+              "prPotentialScore": 91
+            },
+            {
+              "id": "docs-install",
+              "title": "Document the local install path",
+              "summary": "Duplicate lower-scoring suggestion.",
+              "rationale": "Same suggestion should be deduped.",
+              "targetFiles": [
+                {
+                  "path": "README.md",
+                  "reason": "Primary onboarding documentation"
+                }
+              ],
+              "proposedChanges": ["Add a smaller docs note"],
+              "validationPlan": ["Read the docs"],
+              "risks": [],
+              "estimatedWorkload": "small",
+              "prPotentialScore": 61
+            }
+          ]
+        }
+      }
+    `);
+
+    expect(suggestions.status).toBe('success');
+    expect(suggestions.data).toHaveLength(2);
+    expect(suggestions.data[0]?.id).toBe('config-validation');
+    expect(suggestions.data[0]?.targetFiles.map((file) => file.path)).toEqual([
+      'src/infra/config.ts',
+      'test/config.test.ts',
+    ]);
+    expect(suggestions.data[1]?.id).toBe('docs-install');
+    expect(suggestions.data[1]?.summary).toBe('Make setup instructions easier to follow.');
+  });
+
+  test('generates repository analysis requests from workspace context', async () => {
+    const service = new LLMService() as unknown as LLMServiceInternals & {
+      initialize(
+        apiKey: string,
+        baseUrl: string,
+        modelName?: string,
+        apiHeaders?: Record<string, string>,
+        provider?: 'openai',
+        reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',
+        stream?: boolean,
+      ): void;
+    };
+    const payloads: Array<{
+      messages: Array<{ role: string; content: string }>;
+      stream?: boolean;
+      reasoning_effort?: string;
+    }> = [];
+
+    service.initialize('sk-test', 'https://api.openai.com/v1', 'gpt-5.5', {}, 'openai', 'high', true);
+    service.client = {
+      chat: {
+        completions: {
+          create: async (payload) => {
+            payloads.push(payload);
+            return {
+              choices: [{
+                message: {
+                  content: JSON.stringify({
+                    version: '1',
+                    kind: 'repository_suggestion_list',
+                    status: 'success',
+                    data: {
+                      suggestions: [
+                        {
+                          id: 'docs-install',
+                          title: 'Document local install',
+                          summary: 'Clarify setup docs.',
+                          rationale: 'README setup is incomplete.',
+                          targetFiles: [{ path: 'README.md', reason: 'Setup docs' }],
+                          proposedChanges: ['Add local install instructions'],
+                          validationPlan: ['Review README commands'],
+                          risks: [],
+                          estimatedWorkload: 'small',
+                          prPotentialScore: 82,
+                        },
+                      ],
+                    },
+                  }),
+                },
+              }],
+            };
+          },
+        },
+      },
+    };
+
+    const result = await service.analyzeRepository(
+      'acme/demo',
+      createWorkspace({
+        topLevelFiles: ['README.md', 'package.json', 'src'],
+        candidateFiles: ['README.md', 'src/index.ts'],
+        snippets: [
+          { path: 'README.md', content: '# Demo\n\nInstall instructions are missing.\n' },
+          { path: 'src/index.ts', content: 'export const demo = true;\n' },
+        ],
+        testCommands: [{ command: 'bun test', reason: 'Detected package.json test script (bun)', source: 'repo-script' }],
+        validationCommands: [{ command: 'bun test', reason: 'Detected package.json test script (bun)', source: 'repo-script' }],
+      }),
+      createMemory(),
+    );
+
+    expect(result.data[0]?.title).toBe('Document local install');
+    expect(payloads[0]).toMatchObject({
+      stream: true,
+      reasoning_effort: 'high',
+    });
+    expect(payloads[0]?.messages[1]?.content).toContain('Repository: acme/demo');
+    expect(payloads[0]?.messages[1]?.content).toContain('Candidate Files: README.md, src/index.ts');
+    expect(payloads[0]?.messages[1]?.content).toContain('FILE: README.md');
+    expect(payloads[0]?.messages[1]?.content).toContain('Detected Test Commands: bun test');
+  });
+});
 
 describe('LLMService implementation draft parsing', () => {
   test('parses raw JSON responses into file change drafts', () => {
