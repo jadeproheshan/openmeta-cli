@@ -1,6 +1,6 @@
-import { configService, parseLLMReasoningEffort, prompt, ui } from '../infra/index.js';
-import { schedulerService } from '../services/index.js';
-import type { AppConfig } from '../types/index.js';
+import { configService, parseLLMReasoningEffort, prompt, selectPrompt, ui } from '../infra/index.js';
+import { schedulerService, SCORING_PRESETS, getPreset, normalizeWeights, normalizeOverallWeights } from '../services/index.js';
+import type { AppConfig, ScoringWeights, OverallWeights } from '../types/index.js';
 
 export class ConfigOrchestrator {
   async view(): Promise<void> {
@@ -86,6 +86,19 @@ export class ConfigOrchestrator {
       tone: 'muted',
     });
 
+    const sw = config.scoring.weights;
+    const ow = config.scoring.overallWeights;
+    ui.keyValues('Scoring weights', [
+      { label: 'Active preset', value: config.scoring.preset || 'custom', tone: config.scoring.preset ? 'success' : 'muted' },
+      { label: 'Freshness', value: `${(sw.freshness * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Onboarding Clarity', value: `${(sw.onboardingClarity * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Merge Potential', value: `${(sw.mergePotential * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Impact', value: `${(sw.impact * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Risk Penalty', value: `${(sw.riskPenalty * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Technical Match', value: `${(ow.technicalMatch * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Opportunity Score', value: `${(ow.opportunityScore * 100).toFixed(0)}%`, tone: 'info' },
+    ]);
+
     if (missingRequired > 0) {
       ui.callout({
         label: 'OpenMeta Config',
@@ -102,6 +115,10 @@ export class ConfigOrchestrator {
                        'github.username', 'github.pat', 'github.targetRepoPath', 'llm.provider', 'llm.apiBaseUrl', 'llm.apiKey', 'llm.modelName', 'llm.reasoningEffort', 'llm.stream',
                        'automation.enabled', 'automation.scheduleTime', 'automation.contentType',
                        'automation.minMatchScore', 'automation.skipIfAlreadyGeneratedToday',
+                       'scoring.weights.freshness', 'scoring.weights.onboardingClarity',
+                       'scoring.weights.mergePotential', 'scoring.weights.impact', 'scoring.weights.riskPenalty',
+                       'scoring.overallWeights.technicalMatch', 'scoring.overallWeights.opportunityScore',
+                       'scoring.preset',
                        'commitTemplate'];
 
     if (!validPaths.includes(key)) {
@@ -195,6 +212,34 @@ export class ConfigOrchestrator {
           skipIfAlreadyGeneratedToday: this.parseBoolean(value, key),
         },
       });
+    } else if (key.startsWith('scoring.weights.')) {
+      const weightKey = key.replace('scoring.weights.', '') as keyof ScoringWeights;
+      const numValue = Number.parseFloat(value);
+      if (Number.isNaN(numValue) || numValue < 0 || numValue > 1) {
+        throw new Error(`${key} must be a number between 0 and 1.`);
+      }
+      const newWeights = normalizeWeights({ ...config.scoring.weights, [weightKey]: numValue });
+      updated = await configService.update({
+        scoring: { ...config.scoring, weights: newWeights, preset: 'custom' },
+      });
+    } else if (key.startsWith('scoring.overallWeights.')) {
+      const weightKey = key.replace('scoring.overallWeights.', '') as keyof OverallWeights;
+      const numValue = Number.parseFloat(value);
+      if (Number.isNaN(numValue) || numValue < 0 || numValue > 1) {
+        throw new Error(`${key} must be a number between 0 and 1.`);
+      }
+      const newWeights = normalizeOverallWeights({ ...config.scoring.overallWeights, [weightKey]: numValue });
+      updated = await configService.update({
+        scoring: { ...config.scoring, overallWeights: newWeights, preset: 'custom' },
+      });
+    } else if (key === 'scoring.preset') {
+      const preset = getPreset(value);
+      if (!preset) {
+        throw new Error(`Unknown scoring preset "${value}". Available: ${SCORING_PRESETS.map(p => p.name).join(', ')}`);
+      }
+      updated = await configService.update({
+        scoring: { weights: preset.weights, overallWeights: preset.overallWeights, preset: preset.name },
+      });
     } else if (key === 'commitTemplate') {
       updated = await configService.update({ commitTemplate: value });
     } else {
@@ -222,6 +267,132 @@ export class ConfigOrchestrator {
       ],
       tone: resultTone,
     });
+  }
+
+  async scoring(): Promise<void> {
+    const config = await configService.get();
+
+    ui.hero({
+      label: 'OpenMeta Scoring',
+      title: 'Tune the scoring weights to match your contribution style',
+      subtitle: 'Choose a preset or customize individual weights. Higher weight = more influence on the final ranking.',
+      tone: 'accent',
+    });
+
+    const presetChoices = [
+      ...SCORING_PRESETS.map((p) => ({
+        name: `${p.label} — ${p.description}`,
+        value: p.name,
+      })),
+      { name: 'Custom — Adjust weights manually', value: 'custom' },
+    ];
+
+    const selectedPreset = await selectPrompt<string>({
+      message: 'Select a scoring preset',
+      choices: presetChoices,
+      default: config.scoring.preset || 'balanced',
+    });
+
+    let newWeights: ScoringWeights;
+    let newOverallWeights: OverallWeights;
+
+    if (selectedPreset !== 'custom') {
+      const preset = getPreset(selectedPreset)!;
+      newWeights = preset.weights;
+      newOverallWeights = preset.overallWeights;
+    } else {
+      ui.section('Custom weights', 'Enter a value between 0 and 100 for each dimension. They will be normalized automatically.');
+
+      const current = config.scoring.weights;
+      const entries: Array<{ key: keyof ScoringWeights; label: string; default: number }> = [
+        { key: 'freshness', label: 'Freshness (newer issues rank higher)', default: Math.round(current.freshness * 100) },
+        { key: 'onboardingClarity', label: 'Onboarding Clarity (clear descriptions, good-first-issue)', default: Math.round(current.onboardingClarity * 100) },
+        { key: 'mergePotential', label: 'Merge Potential (likely to be accepted)', default: Math.round(current.mergePotential * 100) },
+        { key: 'impact', label: 'Impact (repo stars and visibility)', default: Math.round(current.impact * 100) },
+        { key: 'riskPenalty', label: 'Risk Penalty (reduce score for risky issues)', default: Math.round(current.riskPenalty * 100) },
+      ];
+
+      const rawWeights: Record<string, number> = {};
+      for (const entry of entries) {
+        const result = await prompt<{ value: string }>([{
+          type: 'input',
+          name: 'value',
+          message: `${entry.label} (0-100)`,
+          default: String(entry.default),
+        }]);
+        const num = Number.parseInt(result.value, 10);
+        if (Number.isNaN(num) || num < 0 || num > 100) {
+          throw new Error('Weight must be an integer between 0 and 100.');
+        }
+        rawWeights[entry.key] = num / 100;
+      }
+
+      newWeights = normalizeWeights(rawWeights as unknown as ScoringWeights);
+
+      const owCurrent = config.scoring.overallWeights;
+      ui.section('Overall weights', 'Adjust the balance between technical match and opportunity score.');
+
+      const owEntries: Array<{ key: keyof OverallWeights; label: string; default: number }> = [
+        { key: 'technicalMatch', label: 'Technical Match (your stack vs issue)', default: Math.round(owCurrent.technicalMatch * 100) },
+        { key: 'opportunityScore', label: 'Opportunity Score (freshness, impact, clarity)', default: Math.round(owCurrent.opportunityScore * 100) },
+      ];
+
+      const rawOverall: Record<string, number> = {};
+      for (const entry of owEntries) {
+        const result = await prompt<{ value: string }>([{
+          type: 'input',
+          name: 'value',
+          message: `${entry.label} (0-100)`,
+          default: String(entry.default),
+        }]);
+        const num = Number.parseInt(result.value, 10);
+        if (Number.isNaN(num) || num < 0 || num > 100) {
+          throw new Error('Weight must be an integer between 0 and 100.');
+        }
+        rawOverall[entry.key] = num / 100;
+      }
+
+      newOverallWeights = normalizeOverallWeights(rawOverall as unknown as OverallWeights);
+    }
+
+    ui.keyValues('Preview — Scoring weights', [
+      { label: 'Preset', value: selectedPreset === 'custom' ? 'custom' : selectedPreset, tone: 'success' },
+      { label: 'Freshness', value: `${(newWeights.freshness * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Onboarding Clarity', value: `${(newWeights.onboardingClarity * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Merge Potential', value: `${(newWeights.mergePotential * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Impact', value: `${(newWeights.impact * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Risk Penalty', value: `${(newWeights.riskPenalty * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Technical Match', value: `${(newOverallWeights.technicalMatch * 100).toFixed(0)}%`, tone: 'info' },
+      { label: 'Opportunity Score', value: `${(newOverallWeights.opportunityScore * 100).toFixed(0)}%`, tone: 'info' },
+    ]);
+
+    const { confirm } = await prompt<{ confirm: boolean }>([{
+      type: 'confirm',
+      name: 'confirm',
+      message: 'Save these scoring weights?',
+      default: true,
+    }]);
+
+    if (confirm) {
+      const presetName = selectedPreset === 'custom' ? 'custom' : selectedPreset;
+      await configService.update({
+        scoring: { weights: newWeights, overallWeights: newOverallWeights, preset: presetName },
+      });
+      ui.banner({
+        label: 'OpenMeta Scoring',
+        title: 'Scoring weights updated',
+        subtitle: `Preset: ${presetName}. The new weights will be used in the next scout/agent run.`,
+        lines: [`Config: ${configService.getConfigPath()}`],
+        tone: 'success',
+      });
+    } else {
+      ui.callout({
+        label: 'OpenMeta Scoring',
+        title: 'Changes discarded',
+        subtitle: 'Scoring weights remain unchanged.',
+        tone: 'info',
+      });
+    }
   }
 
   async reset(): Promise<void> {
@@ -322,9 +493,14 @@ export class ConfigOrchestrator {
         return String(config.automation.minMatchScore);
       case 'automation.skipIfAlreadyGeneratedToday':
         return config.automation.skipIfAlreadyGeneratedToday ? 'yes' : 'no';
+      case 'scoring.preset':
+        return config.scoring.preset;
       case 'commitTemplate':
         return config.commitTemplate;
       default:
+        if (key.startsWith('scoring.')) {
+          return '(updated)';
+        }
         return '(updated)';
     }
   }

@@ -46,11 +46,11 @@ export class IssueRankingService {
     });
     const rankedCandidates = this.rankIssuesForProfile(issues, config.userProfile);
     if (options.localOnly) {
-      return opportunityService.rankIssues(this.buildLocalIssueMatches(rankedCandidates, config.userProfile));
+      return opportunityService.rankIssues(this.buildLocalIssueMatches(rankedCandidates, config.userProfile), config.scoring);
     }
 
     const matched = await this.scoreIssuesInBatches(config.userProfile, rankedCandidates);
-    return opportunityService.rankIssues(matched);
+    return opportunityService.rankIssues(matched, config.scoring);
   }
 
   async loadTargetIssue(
@@ -60,10 +60,10 @@ export class IssueRankingService {
     const issue = await githubService.fetchIssue(target.repoFullName, target.issueNumber);
     const [matched] = await this.scoreIssuesInBatches(config.userProfile, [issue]);
     if (!matched) {
-      return opportunityService.rankIssues(this.buildLocalIssueMatches([issue], config.userProfile));
+      return opportunityService.rankIssues(this.buildLocalIssueMatches([issue], config.userProfile), config.scoring);
     }
 
-    return opportunityService.rankIssues([matched]);
+    return opportunityService.rankIssues([matched], config.scoring);
   }
 
   buildLocalIssueMatches(

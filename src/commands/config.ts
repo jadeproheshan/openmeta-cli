@@ -18,6 +18,11 @@ export function registerConfigCommand(program: Command): void {
     .action((key: string, value: string) => runCommand('OpenMeta Config', () => configOrchestrator.set(key, value)));
 
   config
+    .command('scoring')
+    .description('Configure scoring weights interactively with presets or custom values')
+    .action(() => runCommand('OpenMeta Scoring', () => configOrchestrator.scoring()));
+
+  config
     .command('reset')
     .description('Reset configuration to defaults')
     .action(() => runCommand('OpenMeta Config', () => configOrchestrator.reset()));

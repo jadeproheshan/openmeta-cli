@@ -58,6 +58,20 @@ function createDefaultConfig(): AppConfig {
       minMatchScore: 70,
       skipIfAlreadyGeneratedToday: true,
     },
+    scoring: {
+      weights: {
+        freshness: 0.25,
+        onboardingClarity: 0.25,
+        mergePotential: 0.30,
+        impact: 0.20,
+        riskPenalty: 0.35,
+      },
+      overallWeights: {
+        technicalMatch: 0.45,
+        opportunityScore: 0.55,
+      },
+      preset: 'balanced',
+    },
     commitTemplate: 'feat(daily): {{title}}\n\n{{content}}',
   };
 }
@@ -199,6 +213,18 @@ export class ConfigService {
       automation: {
         ...defaults.automation,
         ...config.automation,
+      },
+      scoring: {
+        ...defaults.scoring,
+        ...config.scoring,
+        weights: {
+          ...defaults.scoring.weights,
+          ...config.scoring?.weights,
+        },
+        overallWeights: {
+          ...defaults.scoring.overallWeights,
+          ...config.scoring?.overallWeights,
+        },
       },
     };
   }
