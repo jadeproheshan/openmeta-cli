@@ -11,6 +11,7 @@ import {
   registerInitCommand,
   registerMachineCommand,
   registerPowCommand,
+  registerPresetCommand,
   registerProviderCommand,
   registerRunsCommand,
   registerScoutCommand,
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
   registerPowCommand(program);
   registerConfigCommand(program);
   registerProviderCommand(program);
+  registerPresetCommand(program);
   registerAutomationCommand(program);
   registerDoctorCommand(program);
   registerRunsCommand(program);
