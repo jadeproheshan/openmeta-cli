@@ -1,4 +1,5 @@
 import { analyzeOrchestrator } from '../index.js';
+import { runInMachineContext } from '../../infra/index.js';
 import { mapMachineError } from './errors.js';
 import { buildMachineEnvelope, writeMachinePayload } from './runtime.js';
 
@@ -10,12 +11,12 @@ export class MachineAnalyzeOrchestrator {
     dryRun?: boolean;
   } = {}): Promise<void> {
     try {
-      const result = await analyzeOrchestrator.runMachine({
+      const result = await runInMachineContext(() => analyzeOrchestrator.runMachine({
         repo: options.repo,
-        headless: options.headless,
+        headless: options.headless ?? true,
         runChecks: options.runChecks,
         dryRun: options.dryRun,
-      });
+      }));
       writeMachinePayload(buildMachineEnvelope('machine analyze', result));
     } catch (error) {
       const mapped = mapMachineError('machine analyze', error);

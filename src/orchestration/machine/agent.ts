@@ -1,4 +1,5 @@
 import { agentOrchestrator } from '../index.js';
+import { runInMachineContext } from '../../infra/index.js';
 import { mapMachineError } from './errors.js';
 import { buildMachineEnvelope, writeMachinePayload } from './runtime.js';
 
@@ -13,15 +14,15 @@ export class MachineAgentFlowOrchestrator {
     dryRun?: boolean;
   } = {}): Promise<void> {
     try {
-      const result = await agentOrchestrator.runMachine({
-        headless: options.headless,
+      const result = await runInMachineContext(() => agentOrchestrator.runMachine({
+        headless: options.headless ?? true,
         runChecks: options.runChecks,
         draftOnly: options.draftOnly,
         refresh: options.refresh,
         repo: options.repo,
         issue: options.issue,
         dryRun: options.dryRun,
-      });
+      }));
       writeMachinePayload(buildMachineEnvelope('machine agent', result));
     } catch (error) {
       const mapped = mapMachineError('machine agent', error);

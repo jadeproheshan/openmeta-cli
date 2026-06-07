@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { registerMachineCommand } from '../src/commands/machine.js';
 import * as infra from '../src/infra/index.js';
 import { agentOrchestrator, analyzeOrchestrator, configOrchestrator, providerOrchestrator } from '../src/orchestration/index.js';
+import { githubService, issueRankingService } from '../src/services/index.js';
 import { createPatchDraft, createPullRequestDraft, createRankedIssue, createRepositorySuggestion, createWorkspace } from './helpers/factories.js';
 
 function captureStdout(): string[] {
@@ -311,5 +312,44 @@ describe('machine commands', () => {
     expect(output.command).toBe('machine agent');
     expect(output.data.executionOutcome).toBe('draft_only');
     expect(output.data.repoMutated).toBe(false);
+  });
+
+  test('machine scout suppresses human task output during real machine execution', async () => {
+    const writes = captureStdout();
+    const program = new Command();
+    registerMachineCommand(program);
+
+    spyOn(infra.configService, 'get').mockResolvedValue({
+      userProfile: { techStack: ['typescript'], proficiency: 'intermediate', focusAreas: ['cli'] },
+      github: { pat: 'ghp_test_token', username: 'octocat', targetRepoPath: '' },
+      llm: {
+        provider: 'custom',
+        apiBaseUrl: 'https://example.com/v1',
+        apiKey: 'sk-test',
+        modelName: 'test-model',
+        apiHeaders: {},
+        activeProfile: '',
+        profiles: {},
+      },
+      automation: {
+        enabled: false,
+        scheduleTime: '09:00',
+        timezone: 'UTC',
+        contentType: 'research_note',
+        scheduler: 'manual',
+        minMatchScore: 70,
+        skipIfAlreadyGeneratedToday: true,
+      },
+      commitTemplate: 'feat: {{title}}',
+    });
+    spyOn(githubService, 'validateCredentials').mockResolvedValue(true);
+    spyOn(issueRankingService, 'loadRankedIssues').mockResolvedValue([]);
+
+    await program.parseAsync(['machine', 'scout', '--local'], { from: 'user' });
+
+    const output = writes.join('');
+    expect(() => JSON.parse(output)).not.toThrow();
+    expect(output).not.toContain('Validating GitHub access');
+    expect(output).not.toContain('[success]');
   });
 });

@@ -1,8 +1,26 @@
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
-const SKILLS_ROOT = join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), '..', 'skills');
+function resolveSkillsRoot(): string {
+  const modulePath = fileURLToPath(import.meta.url);
+  const moduleDir = dirname(modulePath);
+  const candidates = [
+    join(moduleDir, '..', '..', '..', 'skills'),
+    join(moduleDir, '..', '..', '..', '..', 'skills'),
+    join(process.cwd(), 'skills'),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, 'core', 'openmeta.md'))) {
+      return candidate;
+    }
+  }
+
+  return candidates[0]!;
+}
+
+const SKILLS_ROOT = resolveSkillsRoot();
 
 export type SkillHost = 'claude-code' | 'openclaw';
 

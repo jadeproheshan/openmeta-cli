@@ -1,4 +1,5 @@
 import { agentOrchestrator } from '../index.js';
+import { runInMachineContext } from '../../infra/index.js';
 import { mapMachineError } from './errors.js';
 import { buildMachineEnvelope, writeMachinePayload } from './runtime.js';
 
@@ -10,12 +11,12 @@ export class MachineScoutOrchestrator {
     local?: boolean;
   } = {}): Promise<void> {
     try {
-      const result = await agentOrchestrator.scoutMachine({
+      const result = await runInMachineContext(() => agentOrchestrator.scoutMachine({
         limit: Number.parseInt(options.limit || '10', 10) || 10,
         refresh: options.refresh,
         repo: options.repo,
         localOnly: options.local,
-      });
+      }));
       writeMachinePayload(buildMachineEnvelope('machine scout', result));
     } catch (error) {
       const mapped = mapMachineError('machine scout', error);
