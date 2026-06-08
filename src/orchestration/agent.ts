@@ -66,6 +66,11 @@ export interface MachineScoutResult {
     repo?: string;
     localOnly: boolean;
   };
+  emptyExplanation?: {
+    title: string;
+    detail: string;
+    suggestions: string[];
+  };
   nextActions: string[];
 }
 
@@ -160,6 +165,25 @@ const AGENT_STAGES: Array<{ id: AgentStageId; label: string; description: string
 
 export class AgentOrchestrator {
   private octokit: Octokit | null = null;
+
+  private buildScoutEmptyExplanation(
+    config: AppConfig,
+    options: { repoFullName?: string; localOnly: boolean; refresh: boolean },
+  ): { title: string; detail: string; suggestions: string[] } {
+    const scopeLine = options.repoFullName
+      ? `This run was limited to ${options.repoFullName}.`
+      : 'This run searched the broader GitHub issue stream.';
+
+    return {
+      title: 'No issues cleared the current filters',
+      detail: `${scopeLine} OpenMeta did not find any opportunities that survived the current profile weighting and ${config.automation.minMatchScore}/100 threshold.`,
+      suggestions: [
+        `Lower automation.minMatchScore below ${config.automation.minMatchScore}.`,
+        options.repoFullName ? 'Try a different repository or remove the repo filter.' : 'Broaden your tech stack or focus areas in the saved profile.',
+        options.localOnly ? 'Run scout without --local after the LLM provider is healthy to widen scoring coverage.' : options.refresh ? 'Try again later after new issues appear.' : 'Rerun with --refresh to ignore the local issue cache.',
+      ],
+    };
+  }
 
   async runMachine(options: AgentRunOptions = {}): Promise<MachineAgentResult> {
     const totalSteps = 8;
@@ -793,7 +817,8 @@ export class AgentOrchestrator {
       onStatus: (message) => task.setMessage(message),
     }));
     if (rankedIssues.length === 0) {
-      ui.emptyState('OpenMeta Scout', 'No issues found', 'No issues met the current scoring thresholds.');
+      const emptyExplanation = this.buildScoutEmptyExplanation(config, { repoFullName, localOnly, refresh });
+      ui.emptyState('OpenMeta Scout', emptyExplanation.title, `${emptyExplanation.detail} Next: ${emptyExplanation.suggestions.join(' ')}`);
       return;
     }
 
@@ -841,6 +866,9 @@ export class AgentOrchestrator {
       localOnly,
       onStatus: (message) => task.setMessage(message),
     }));
+    const emptyExplanation = rankedIssues.length === 0
+      ? this.buildScoutEmptyExplanation(config, { repoFullName, localOnly, refresh })
+      : undefined;
 
     return {
       opportunities: issueRankingService.diversifyScoutIssues(rankedIssues, limit),
@@ -850,6 +878,7 @@ export class AgentOrchestrator {
         repo: repoFullName,
         localOnly,
       },
+      ...(emptyExplanation ? { emptyExplanation } : {}),
       nextActions: rankedIssues.length === 0 ? ['broaden_profile_filters'] : ['inspect_ranked_opportunities'],
     };
   }

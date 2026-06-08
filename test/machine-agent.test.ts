@@ -231,6 +231,25 @@ describe('machine flow result builders', () => {
     expect(result.opportunities).toEqual([issue]);
   });
 
+  test('machine scout returns an actionable empty explanation when no issues survive the filters', async () => {
+    const config = createConfig();
+    const orchestrator = new AgentOrchestrator();
+
+    spyOn(infra.configService, 'get').mockResolvedValue(config);
+    spyOn(orchestrator as AgentOrchestrator, 'validateConfig' as never).mockResolvedValue(undefined);
+    spyOn(issueRankingService, 'loadRankedIssues').mockResolvedValue([]);
+
+    const result = await orchestrator.scoutMachine({ localOnly: true });
+
+    expect(result.opportunities).toEqual([]);
+    expect(result.emptyExplanation).toEqual(expect.objectContaining({
+      title: 'No issues cleared the current filters',
+    }));
+    expect(result.emptyExplanation?.detail).toContain('75/100 threshold');
+    expect(result.emptyExplanation?.suggestions[0]).toContain('Lower automation.minMatchScore');
+    expect(result.nextActions).toEqual(['broaden_profile_filters']);
+  });
+
   test('machine analyze returns selected suggestion and artifact paths', async () => {
     const config = createConfig();
     const workspace = createWorkspace({

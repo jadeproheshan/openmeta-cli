@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { basename, dirname, join, relative, resolve, sep } from 'path';
 import { simpleGit, type SimpleGit } from 'simple-git';
@@ -257,23 +257,42 @@ export class WorkspaceService {
     const repoUrl = this.buildRepoUrl(repoFullName);
     const defaultBranch = await this.detectRemoteDefaultBranch(repoUrl);
 
-    if (!existsSync(workspacePath)) {
-      mkdirSync(dirname(workspacePath), { recursive: true });
-      await simpleGit().clone(repoUrl, workspacePath, ['--depth', '1', '--single-branch', '--branch', defaultBranch]);
-    }
+    try {
+      if (!existsSync(workspacePath)) {
+        await this.cloneManagedWorkspace(repoUrl, workspacePath, defaultBranch);
+      }
 
-    const git = simpleGit(workspacePath);
-    await this.syncManagedWorkspace(git);
+      const git = simpleGit(workspacePath);
+      await this.syncManagedWorkspace(git);
 
-    if (!existsSync(join(workspacePath, '.git', 'shallow'))) {
+      if (!existsSync(join(workspacePath, '.git', 'shallow'))) {
+        try {
+          await git.fetch('origin', defaultBranch, { '--depth': '1', '--prune': null });
+        } catch (error) {
+          logger.debug(`Unable to re-fetch ${repoFullName} as a shallow workspace`, error);
+        }
+      }
+
+      return await this.finalizeWorkspaceBranch(git, workspacePath, defaultBranch, createBranchName);
+    } catch (error) {
+      if (!this.isRecoverableManagedWorkspaceError(error)) {
+        throw error;
+      }
+
+      logger.warn(`Managed workspace cache for ${repoFullName} is invalid. Rebuilding the shallow clone.`, error);
+      rmSync(workspacePath, { recursive: true, force: true });
+      await this.cloneManagedWorkspace(repoUrl, workspacePath, defaultBranch);
+      const recoveredGit = simpleGit(workspacePath);
+      await this.syncManagedWorkspace(recoveredGit);
+
       try {
-        await git.fetch('origin', defaultBranch, { '--depth': '1', '--prune': null });
+        await recoveredGit.fetch('origin', defaultBranch, { '--depth': '1', '--prune': null });
       } catch (error) {
         logger.debug(`Unable to re-fetch ${repoFullName} as a shallow workspace`, error);
       }
-    }
 
-    return this.finalizeWorkspaceBranch(git, workspacePath, defaultBranch, createBranchName);
+      return await this.finalizeWorkspaceBranch(recoveredGit, workspacePath, defaultBranch, createBranchName);
+    }
   }
 
   private async prepareExternalWorkspace(
@@ -362,6 +381,16 @@ export class WorkspaceService {
       workspaceDirty,
       branchName,
     };
+  }
+
+  private async cloneManagedWorkspace(repoUrl: string, workspacePath: string, defaultBranch: string): Promise<void> {
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    await simpleGit().clone(repoUrl, workspacePath, ['--depth', '1', '--single-branch', '--branch', defaultBranch]);
+  }
+
+  private isRecoverableManagedWorkspaceError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /\binvalid HEAD\b|\bbad object HEAD\b|\bambiguous argument 'HEAD'\b|\bNeeded a single revision\b|\bunable to read tree\b/i.test(message);
   }
 
   private getExecutionWorktreePath(repoFullName: string, branchName: string): string {

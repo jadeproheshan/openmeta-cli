@@ -281,6 +281,62 @@ describe('workspaceService.detectTestCommands', () => {
     }
   });
 
+  test('rebuilds a managed workspace when the cached clone has an invalid HEAD', async () => {
+    const tempRoot = makeWorkspace();
+    const openMetaHome = join(tempRoot, 'openmeta-home');
+    const remotePath = join(tempRoot, 'remote.git');
+    const seedPath = join(tempRoot, 'seed');
+    process.env['OPENMETA_HOME'] = openMetaHome;
+
+    mkdirSync(seedPath, { recursive: true });
+    const seedGit = simpleGit(seedPath);
+    await seedGit.init(['--initial-branch=main']);
+    await seedGit.addConfig('user.name', 'OpenMeta Test');
+    await seedGit.addConfig('user.email', 'openmeta@example.com');
+    writeFileSync(join(seedPath, 'README.md'), '# Demo\n', 'utf-8');
+    await seedGit.add('README.md');
+    await seedGit.commit('chore: seed repo');
+    await simpleGit().clone(seedPath, remotePath, ['--bare']);
+
+    const service = workspaceService as unknown as {
+      buildRepoUrl(repoFullName: string): string;
+      prepareRepositoryWorkspace(
+        repoFullName: string,
+        memory: ReturnType<typeof createMemory>,
+        runChecks: boolean,
+        executionMode?: 'interactive' | 'headless',
+        repoPath?: string,
+      ): Promise<{ workspacePath: string; topLevelFiles: string[] }>;
+    };
+    const originalBuildRepoUrl = service.buildRepoUrl;
+    service.buildRepoUrl = () => remotePath;
+
+    try {
+      const firstWorkspace = await service.prepareRepositoryWorkspace(
+        'acme/demo',
+        createMemory({ repoFullName: 'acme/demo' }),
+        false,
+      );
+      const headPath = join(firstWorkspace.workspacePath, '.git', 'refs', 'heads', 'main');
+      writeFileSync(headPath, '0000000000000000000000000000000000000000\n', 'utf-8');
+
+      const recoveredWorkspace = await service.prepareRepositoryWorkspace(
+        'acme/demo',
+        createMemory({ repoFullName: 'acme/demo' }),
+        false,
+      );
+      const recoveredGit = simpleGit(recoveredWorkspace.workspacePath);
+      const branchSummary = await recoveredGit.branchLocal();
+
+      expect(recoveredWorkspace.workspacePath).toBe(firstWorkspace.workspacePath);
+      expect(recoveredWorkspace.topLevelFiles).toContain('README.md');
+      expect(branchSummary.current).toMatch(/^openmeta\/analyze-acme-demo/);
+    } finally {
+      service.buildRepoUrl = originalBuildRepoUrl;
+      delete process.env['OPENMETA_HOME'];
+    }
+  });
+
   test('prefers bun for package scripts when a bun lockfile is present', () => {
     const workspacePath = makeWorkspace();
     writeFileSync(join(workspacePath, 'package.json'), JSON.stringify({
