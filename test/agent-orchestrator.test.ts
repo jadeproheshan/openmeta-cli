@@ -161,6 +161,11 @@ function createConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       minMatchScore: 75,
       skipIfAlreadyGeneratedToday: false,
     },
+    scoring: {
+      weights: { freshness: 0.25, onboardingClarity: 0.25, mergePotential: 0.30, impact: 0.20, riskPenalty: 0.35 },
+      overallWeights: { technicalMatch: 0.45, opportunityScore: 0.55 },
+      preset: 'balanced',
+    },
     commitTemplate: 'feat: {{title}}',
     ...overrides,
   };

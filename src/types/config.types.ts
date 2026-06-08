@@ -50,10 +50,38 @@ export interface AutomationConfig {
   skipIfAlreadyGeneratedToday: boolean;
 }
 
+export interface ScoringWeights {
+  freshness: number;
+  onboardingClarity: number;
+  mergePotential: number;
+  impact: number;
+  riskPenalty: number;
+}
+
+export interface OverallWeights {
+  technicalMatch: number;
+  opportunityScore: number;
+}
+
+export interface ScoringPreset {
+  name: string;
+  label: string;
+  description: string;
+  weights: ScoringWeights;
+  overallWeights: OverallWeights;
+}
+
+export interface ScoringConfig {
+  weights: ScoringWeights;
+  overallWeights: OverallWeights;
+  preset: string;
+}
+
 export interface AppConfig {
   userProfile: UserProfile;
   github: GitHubConfig;
   llm: LLMConfig;
   automation: AutomationConfig;
+  scoring: ScoringConfig;
   commitTemplate: string;
 }

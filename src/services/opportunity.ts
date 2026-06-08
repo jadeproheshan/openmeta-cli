@@ -1,4 +1,5 @@
-import type { MatchedIssue, OpportunityAnalysis, RankedIssue } from '../types/index.js';
+import type { MatchedIssue, OpportunityAnalysis, RankedIssue, ScoringConfig } from '../types/index.js';
+import { DEFAULT_SCORING } from './scoring-presets.js';
 
 const ACTION_RISK_LABELS = new Set([
   'blocked',
@@ -145,7 +146,11 @@ function computeRiskPenalty(issue: MatchedIssue): number {
 }
 
 export class OpportunityService {
-  rankIssues(issues: MatchedIssue[]): RankedIssue[] {
+  rankIssues(issues: MatchedIssue[], scoringConfig?: ScoringConfig): RankedIssue[] {
+    const config = scoringConfig ?? DEFAULT_SCORING;
+    const w = config.weights;
+    const ow = config.overallWeights;
+
     return issues
       .map((issue) => {
         const freshness = computeFreshnessScore(issue.updatedAt);
@@ -154,13 +159,13 @@ export class OpportunityService {
         const mergePotential = computeMergePotential(issue, freshness, riskPenalty);
         const impact = computeImpactScore(issue);
         const opportunityScore = clampScore(
-          freshness * 0.25 +
-          onboardingClarity * 0.25 +
-          mergePotential * 0.30 +
-          impact * 0.20 -
-          riskPenalty * 0.35,
+          freshness * w.freshness +
+          onboardingClarity * w.onboardingClarity +
+          mergePotential * w.mergePotential +
+          impact * w.impact -
+          riskPenalty * w.riskPenalty,
         );
-        const overallScore = clampScore(issue.matchScore * 0.45 + opportunityScore * 0.55);
+        const overallScore = clampScore(issue.matchScore * ow.technicalMatch + opportunityScore * ow.opportunityScore);
 
         const opportunity: OpportunityAnalysis = {
           score: opportunityScore,
