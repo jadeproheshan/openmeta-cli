@@ -22,6 +22,7 @@ import {
 
 export interface AnalyzeRunOptions {
   repo?: string;
+  repoPath?: string;
   headless?: boolean;
   runChecks?: boolean;
   dryRun?: boolean;
@@ -61,9 +62,11 @@ export class AnalyzeOrchestrator {
     const headless = Boolean(options.headless);
     const runChecks = Boolean(options.runChecks);
     const dryRun = Boolean(options.dryRun);
+    const repoPath = options.repoPath?.trim() || undefined;
 
     await this.validateConfig(config);
     await this.initializeClients(config);
+    this.showLocalRepositoryHint(repoPath);
 
     const memory = memoryService.load(repoFullName);
     const workspace = await workspaceService.prepareRepositoryWorkspace(
@@ -71,6 +74,7 @@ export class AnalyzeOrchestrator {
       memory,
       runChecks,
       headless ? 'headless' : 'interactive',
+      repoPath,
     );
 
     const suggestionsResult = await ui.task({
@@ -191,6 +195,30 @@ export class AnalyzeOrchestrator {
       patchDraft,
       prDraft,
       artifacts,
+    });
+  }
+
+  private showLocalRepositoryHint(repoPath?: string): void {
+    if (repoPath) {
+      const message = `Using local repository path via isolated worktree: ${repoPath}`;
+      logger.info(message);
+      ui.callout({
+        label: 'OpenMeta Analyze',
+        title: 'Local repository reuse enabled',
+        subtitle: 'OpenMeta will reuse the provided local repository through an isolated worktree, create a fresh branch, and keep PR work off your existing checkout.',
+        lines: [`Path: ${repoPath}`],
+        tone: 'info',
+      });
+      return;
+    }
+
+    const message = 'Tip: if this repository already exists locally, pass --repo-path <local-path>. OpenMeta will reuse it via an isolated worktree, create a fresh branch, and open the PR from that branch.';
+    logger.info(message);
+    ui.callout({
+      label: 'OpenMeta Analyze',
+      title: 'Faster local reuse available',
+      subtitle: 'If the repository is already on disk, pass --repo-path <local-path>. OpenMeta will reuse it via an isolated worktree, create a fresh branch, and avoid another full local checkout.',
+      tone: 'info',
     });
   }
 

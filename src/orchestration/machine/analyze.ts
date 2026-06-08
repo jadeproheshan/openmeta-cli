@@ -6,6 +6,7 @@ import { buildMachineEnvelope, writeMachinePayload } from './runtime.js';
 export class MachineAnalyzeOrchestrator {
   async execute(options: {
     repo?: string;
+    repoPath?: string;
     headless?: boolean;
     runChecks?: boolean;
     dryRun?: boolean;
@@ -13,6 +14,7 @@ export class MachineAnalyzeOrchestrator {
     try {
       const result = await runInMachineContext(() => analyzeOrchestrator.runMachine({
         repo: options.repo,
+        repoPath: options.repoPath,
         headless: options.headless ?? true,
         runChecks: options.runChecks,
         dryRun: options.dryRun,

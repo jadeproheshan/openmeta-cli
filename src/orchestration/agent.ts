@@ -46,6 +46,7 @@ export interface AgentRunOptions {
   draftOnly?: boolean;
   refresh?: boolean;
   repo?: string;
+  repoPath?: string;
   issue?: string;
   dryRun?: boolean;
 }
@@ -168,6 +169,7 @@ export class AgentOrchestrator {
     const draftOnly = Boolean(options.draftOnly);
     const refresh = Boolean(options.refresh);
     const dryRun = Boolean(options.dryRun);
+    const repoPath = options.repoPath?.trim() || undefined;
     const issueTarget = options.issue ? resolveGitHubIssueTarget(options.issue, options.repo) : undefined;
     const repoFullName = issueTarget?.repoFullName ?? (options.repo ? parseGitHubRepoFullName(options.repo) : undefined);
 
@@ -178,6 +180,7 @@ export class AgentOrchestrator {
     }
 
     await this.initializeClients(config);
+    this.showLocalRepositoryHint(repoPath);
 
     const rankedIssues = issueTarget
       ? await issueRankingService.loadTargetIssue(config, issueTarget)
@@ -210,6 +213,7 @@ export class AgentOrchestrator {
       memoryBeforeRun,
       runChecks,
       headless ? 'headless' : 'interactive',
+      repoPath,
     );
     const memory = memoryService.update(selectedIssue, workspace);
 
@@ -384,6 +388,7 @@ export class AgentOrchestrator {
     const runChecks = typeof options.runChecks === 'boolean' ? options.runChecks : !headless;
     const draftOnly = Boolean(options.draftOnly);
     const refresh = Boolean(options.refresh);
+    const repoPath = options.repoPath?.trim() || undefined;
     const issueTarget = options.issue ? resolveGitHubIssueTarget(options.issue, options.repo) : undefined;
     const repoFullName = issueTarget?.repoFullName ?? (options.repo ? parseGitHubRepoFullName(options.repo) : undefined);
     const completedStages = new Set<AgentStageId>();
@@ -407,6 +412,9 @@ export class AgentOrchestrator {
           : repoFullName
             ? `Issue discovery is limited to ${repoFullName}.`
             : 'Issue discovery will scan the broader GitHub issue stream.',
+        repoPath
+          ? `Local repository reuse is enabled via ${repoPath}. OpenMeta will create an isolated worktree and a fresh branch before opening a PR.`
+          : 'If the repository already exists locally, pass --repo-path <local-path> so OpenMeta can reuse it via an isolated worktree and open the PR from a fresh branch.',
         headless ? `Unattended selection honors the saved threshold at ${config.automation.minMatchScore}/100.` : 'You stay in control at each decision gate before anything is published.',
       ],
     });
@@ -421,6 +429,7 @@ export class AgentOrchestrator {
       ? `Verifying provider access and loading ${issueTarget.repoFullName}#${issueTarget.issueNumber}.`
       : 'Verifying provider access and loading ranked opportunities.');
     await this.initializeClients(config);
+    this.showLocalRepositoryHint(repoPath);
 
     const rankedIssues = await ui.task({
       title: issueTarget ? 'Loading target issue' : 'Ranking contribution opportunities',
@@ -486,6 +495,7 @@ export class AgentOrchestrator {
       memoryBeforeRun,
       runChecks,
       headless ? 'headless' : 'interactive',
+      repoPath,
     ));
     const memory = memoryService.update(selectedIssue, workspace);
     completedStages.add('prepare');
@@ -2158,6 +2168,28 @@ export class AgentOrchestrator {
       subtitle: input.subtitle,
       lines: input.lines,
       tone: 'warning',
+    });
+  }
+
+  private showLocalRepositoryHint(repoPath?: string): void {
+    if (repoPath) {
+      logger.info(`Using local repository path via isolated worktree: ${repoPath}`);
+      ui.callout({
+        label: 'OpenMeta Agent',
+        title: 'Local repository reuse enabled',
+        subtitle: 'OpenMeta will reuse the provided local repository through an isolated worktree, create a fresh branch, and keep PR work off your existing checkout.',
+        lines: [`Path: ${repoPath}`],
+        tone: 'info',
+      });
+      return;
+    }
+
+    logger.info('Tip: if this repository already exists locally, pass --repo-path <local-path>. OpenMeta will reuse it via an isolated worktree, create a fresh branch, and open the PR from that branch.');
+    ui.callout({
+      label: 'OpenMeta Agent',
+      title: 'Faster local reuse available',
+      subtitle: 'If the repository is already on disk, pass --repo-path <local-path>. OpenMeta will reuse it via an isolated worktree, create a fresh branch, and avoid another full local checkout.',
+      tone: 'info',
     });
   }
 

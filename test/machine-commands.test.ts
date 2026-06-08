@@ -51,6 +51,8 @@ describe('machine commands', () => {
 
     const machineCommand = program.commands.find((command) => command.name() === 'machine');
     const help = machineCommand?.helpInformation() ?? '';
+    const analyzeHelp = machineCommand?.commands.find((command) => command.name() === 'analyze')?.helpInformation() ?? '';
+    const agentHelp = machineCommand?.commands.find((command) => command.name() === 'agent')?.helpInformation() ?? '';
 
     expect(help).toContain('doctor');
     expect(help).toContain('config');
@@ -59,6 +61,8 @@ describe('machine commands', () => {
     expect(help).toContain('scout');
     expect(help).toContain('analyze');
     expect(help).toContain('agent');
+    expect(analyzeHelp).toContain('--repo-path <path>');
+    expect(agentHelp).toContain('--repo-path <path>');
   });
 
   test('machine doctor writes only JSON to stdout', async () => {
@@ -306,7 +310,7 @@ describe('machine commands', () => {
     spyOn(contentService, 'formatPatchDraftMarkdown').mockReturnValue('# Patch');
     spyOn(contentService, 'formatPullRequestDraftMarkdown').mockReturnValue('# PR');
 
-    await program.parseAsync(['machine', 'analyze', '--repo', 'acme/demo', '--headless', '--dry-run'], { from: 'user' });
+    await program.parseAsync(['machine', 'analyze', '--repo', 'acme/demo', '--repo-path', '/Users/example/src/demo', '--headless', '--dry-run'], { from: 'user' });
 
     const output = JSON.parse(writes.join(''));
     expect(output.command).toBe('machine analyze');

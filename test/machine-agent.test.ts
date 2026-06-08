@@ -188,6 +188,7 @@ describe('machine flow result builders', () => {
     }));
 
     const combined = stderrWrites.join('');
+    expect(combined).toContain('--repo-path <local-path>');
     expect(combined).toContain('Inspecting repository for grounded contribution ideas');
     expect(combined).toContain('Selecting the strongest repository suggestion');
     expect(combined).toContain('Drafting patch strategy for the selected suggestion');

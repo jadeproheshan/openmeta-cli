@@ -10,6 +10,7 @@ export class MachineAgentFlowOrchestrator {
     draftOnly?: boolean;
     refresh?: boolean;
     repo?: string;
+    repoPath?: string;
     issue?: string;
     dryRun?: boolean;
   } = {}): Promise<void> {
@@ -20,6 +21,7 @@ export class MachineAgentFlowOrchestrator {
         draftOnly: options.draftOnly,
         refresh: options.refresh,
         repo: options.repo,
+        repoPath: options.repoPath,
         issue: options.issue,
         dryRun: options.dryRun,
       }));
