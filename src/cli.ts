@@ -18,7 +18,7 @@ import {
 } from './commands/index.js';
 import { getErrorMessage, ui } from './infra/index.js';
 
-const VERSION = '1.2.2';
+const VERSION = '1.2.3';
 
 async function main(): Promise<void> {
   const program = new Command();
