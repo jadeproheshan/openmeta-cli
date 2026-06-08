@@ -1,6 +1,7 @@
 import type { AppConfig, GitHubIssue, MatchedIssue, RankedIssue } from '../types/index.js';
 import { logger } from '../infra/index.js';
 import { githubService } from './github.js';
+import { inboxService } from './inbox.js';
 import { llmService } from './llm.js';
 import { opportunityService } from './opportunity.js';
 import { proofOfWorkService } from './proof-of-work.js';
@@ -39,6 +40,11 @@ export class IssueRankingService {
     config: AppConfig,
     options: { refresh?: boolean; repoFullName?: string; localOnly?: boolean; onStatus?: (message: string) => void } = {},
   ): Promise<RankedIssue[]> {
+    if (options.localOnly && !options.repoFullName) {
+      const issues = this.loadLocalRetainedIssues();
+      return opportunityService.rankIssues(this.buildLocalIssueMatches(issues, config.userProfile), config.scoring);
+    }
+
     const issues = await githubService.fetchTrendingIssues({
       refresh: options.refresh,
       repoFullName: options.repoFullName,
@@ -52,6 +58,40 @@ export class IssueRankingService {
 
     const matched = await this.scoreIssuesInBatches(config.userProfile, rankedCandidates);
     return opportunityService.rankIssues(matched, config.scoring);
+  }
+
+  loadLocalRetainedIssues(): GitHubIssue[] {
+    const issueMap = new Map<string, GitHubIssue>();
+
+    const addIssue = (issue: GitHubIssue): void => {
+      issueMap.set(`${issue.repoFullName}#${issue.number}`, issue);
+    };
+
+    for (const item of inboxService.load().items) {
+      addIssue(this.retainedRecordToIssue({
+        repoFullName: item.repoFullName,
+        issueNumber: item.issueNumber,
+        issueTitle: item.issueTitle,
+        summary: item.summary,
+        generatedAt: item.generatedAt,
+        score: item.overallScore,
+      }));
+    }
+
+    for (const record of proofOfWorkService.load().records) {
+      addIssue(this.retainedRecordToIssue({
+        repoFullName: record.repoFullName,
+        issueNumber: record.issueNumber,
+        issueTitle: record.issueTitle,
+        summary: record.published ? 'Previously published OpenMeta proof-of-work record.' : 'Previous OpenMeta proof-of-work record.',
+        generatedAt: record.generatedAt,
+        score: record.overallScore,
+      }));
+    }
+
+    return [...issueMap.values()].sort((left, right) =>
+      new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+    );
   }
 
   async loadTargetIssue(
@@ -86,6 +126,41 @@ export class IssueRankingService {
         },
       };
     });
+  }
+
+  private retainedRecordToIssue(record: {
+    repoFullName: string;
+    issueNumber: number;
+    issueTitle: string;
+    summary: string;
+    generatedAt: string;
+    score: number;
+  }): GitHubIssue {
+    const repoName = record.repoFullName.split('/').pop() || record.repoFullName;
+    const stars = Math.max(0, Math.round(record.score));
+
+    return {
+      id: Math.abs(this.hashIssueKey(`${record.repoFullName}#${record.issueNumber}`)),
+      number: record.issueNumber,
+      title: record.issueTitle,
+      body: record.summary,
+      htmlUrl: `https://github.com/${record.repoFullName}/issues/${record.issueNumber}`,
+      repoName,
+      repoFullName: record.repoFullName,
+      repoDescription: `Retained OpenMeta opportunity for ${record.repoFullName}.`,
+      repoStars: stars,
+      labels: ['openmeta-local'],
+      createdAt: record.generatedAt,
+      updatedAt: record.generatedAt,
+    };
+  }
+
+  private hashIssueKey(value: string): number {
+    let hash = 0;
+    for (const char of value) {
+      hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+    }
+    return hash;
   }
 
   async scoreIssuesInBatches(

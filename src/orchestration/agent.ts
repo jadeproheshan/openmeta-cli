@@ -689,8 +689,10 @@ export class AgentOrchestrator {
     const repoFullName = typeof options === 'number' || !options.repo ? undefined : parseGitHubRepoFullName(options.repo);
     const localOnly = typeof options === 'number' ? false : Boolean(options.localOnly);
     const config = await configService.get();
-    await this.validateConfig(config, { requireLlm: !localOnly });
-    await this.initializeClients(config, { validateLlm: !localOnly });
+    await this.validateConfig(config, { requireGithub: !localOnly, requireLlm: !localOnly });
+    if (!localOnly || repoFullName) {
+      await this.initializeClients(config, { validateGithub: true, validateLlm: !localOnly });
+    }
 
     ui.hero({
       label: 'OpenMeta Scout',
@@ -738,8 +740,10 @@ export class AgentOrchestrator {
     const localOnly = Boolean(options.localOnly);
     const config = await configService.get();
 
-    await this.validateConfig(config, { requireLlm: !localOnly });
-    await this.initializeClients(config, { validateLlm: !localOnly });
+    await this.validateConfig(config, { requireGithub: !localOnly, requireLlm: !localOnly });
+    if (!localOnly || repoFullName) {
+      await this.initializeClients(config, { validateGithub: true, validateLlm: !localOnly });
+    }
 
     const rankedIssues = await issueRankingService.loadRankedIssues(config, {
       refresh,
@@ -1075,11 +1079,12 @@ export class AgentOrchestrator {
 
   private async validateConfig(
     config: AppConfig,
-    options: { requireLlm?: boolean } = {},
+    options: { requireGithub?: boolean; requireLlm?: boolean } = {},
   ): Promise<void> {
+    const requireGithub = options.requireGithub ?? true;
     const requireLlm = options.requireLlm ?? true;
 
-    if (!config.github.pat || !config.github.username) {
+    if (requireGithub && (!config.github.pat || !config.github.username)) {
       throw new Error('GitHub configuration is incomplete. Please run "openmeta init" first.');
     }
 
@@ -1090,24 +1095,28 @@ export class AgentOrchestrator {
 
   private async initializeClients(
     config: AppConfig,
-    options: { validateLlm?: boolean } = {},
+    options: { validateGithub?: boolean; validateLlm?: boolean } = {},
   ): Promise<void> {
+    const validateGithub = options.validateGithub ?? true;
     const validateLlm = options.validateLlm ?? true;
     githubService.initialize(config.github.pat, config.github.username);
-    const ghValid = await ui.task({
-      title: 'Validating GitHub access',
-      doneMessage: 'GitHub access verified',
-      failedMessage: 'GitHub access failed',
-      tone: 'info',
-    }, async () => {
-      const valid = await githubService.validateCredentials();
-      if (!valid) {
-        throw new Error('GitHub validation failed');
+
+    if (validateGithub) {
+      const ghValid = await ui.task({
+        title: 'Validating GitHub access',
+        doneMessage: 'GitHub access verified',
+        failedMessage: 'GitHub access failed',
+        tone: 'info',
+      }, async () => {
+        const valid = await githubService.validateCredentials();
+        if (!valid) {
+          throw new Error('GitHub validation failed');
+        }
+        return true;
+      });
+      if (!ghValid) {
+        throw new Error('GitHub credentials validation failed. Run "openmeta init" to refresh your token.');
       }
-      return true;
-    });
-    if (!ghValid) {
-      throw new Error('GitHub credentials validation failed. Run "openmeta init" to refresh your token.');
     }
 
     this.octokit = new Octokit({ auth: config.github.pat });

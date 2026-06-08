@@ -145,6 +145,23 @@ describe('machine flow result builders', () => {
     expect(result.opportunities).toEqual([issue]);
   });
 
+  test('machine local scout skips external client initialization', async () => {
+    const config = createConfig();
+    const issue = createRankedIssue();
+    const orchestrator = new AgentOrchestrator();
+    const validateSpy = spyOn(orchestrator as AgentOrchestrator, 'validateConfig' as never).mockResolvedValue(undefined);
+    const initializeSpy = spyOn(orchestrator as AgentOrchestrator, 'initializeClients' as never).mockResolvedValue(undefined);
+
+    spyOn(infra.configService, 'get').mockResolvedValue(config);
+    spyOn(issueRankingService, 'loadRankedIssues').mockResolvedValue([issue]);
+
+    const result = await orchestrator.scoutMachine({ limit: 3, localOnly: true });
+
+    expect(validateSpy).toHaveBeenCalledWith(config, { requireGithub: false, requireLlm: false });
+    expect(initializeSpy).not.toHaveBeenCalled();
+    expect(result.opportunities).toEqual([issue]);
+  });
+
   test('machine analyze returns selected suggestion and artifact paths', async () => {
     const config = createConfig();
     const workspace = createWorkspace({
