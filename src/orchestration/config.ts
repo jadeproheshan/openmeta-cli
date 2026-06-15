@@ -566,9 +566,7 @@ export class ConfigOrchestrator {
     });
   }
 
-  private redactProfileSecrets(
-    profiles: Record<string, { apiKey?: string; [key: string]: unknown }>,
-  ): Record<string, unknown> {
+  private redactProfileSecrets(profiles: AppConfig['llm']['profiles'] = {}): Record<string, unknown> {
     return Object.fromEntries(
       Object.entries(profiles).map(([name, profile]) => [name, { ...profile, apiKey: '<REDACTED>' }]),
     );
@@ -576,7 +574,7 @@ export class ConfigOrchestrator {
 
   private restoreProfileSecrets(
     imported: Record<string, unknown>,
-    existing: Record<string, { apiKey?: string; [key: string]: unknown }>,
+    existing: AppConfig['llm']['profiles'] = {},
   ): Record<string, unknown> {
     return Object.fromEntries(
       Object.entries(imported).map(([name, profile]) => {
