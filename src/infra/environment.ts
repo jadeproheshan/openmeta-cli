@@ -1,5 +1,5 @@
-import { spawnSync } from 'child_process';
-import { arch, cpus, freemem, platform, totalmem } from 'os';
+import { spawnSync } from 'node:child_process';
+import { arch, cpus, platform, totalmem } from 'node:os';
 import type {
   CPUInfo,
   DiskInfo,
@@ -25,7 +25,7 @@ function detectOS(): OSInfo {
   const wslDistros = isWSL ? detectWSLDistros() : [];
   const hypervisor = detectHypervisor();
 
-  let distro = currentPlatform;
+  let distro: string = currentPlatform;
   let version = '';
 
   if (currentPlatform === 'win32') {
@@ -98,14 +98,8 @@ function detectContainer(): boolean {
   return false;
 }
 
-function detectWindowsHypervisor(
-  isCI: boolean,
-  isContainer: boolean,
-  ciName?: string,
-): HypervisorInfo {
-  const cs = runCmd(
-    'powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).Manufacturer"',
-  );
+function detectWindowsHypervisor(isCI: boolean, isContainer: boolean, ciName?: string): HypervisorInfo {
+  const cs = runCmd('powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).Manufacturer"');
   const manufacturer = cs.stdout.toLowerCase();
 
   const model = runCmd(
@@ -132,9 +126,7 @@ function detectWindowsHypervisor(
     return { isVM: true, type: 'parallels', isContainer, isCI, ciName };
   }
 
-  const hyperv = runCmd(
-    'powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).HypervisorPresent"',
-  );
+  const hyperv = runCmd('powershell -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).HypervisorPresent"');
   if (hyperv.stdout.trim() === 'True') {
     if (
       model.includes('virtual') ||
@@ -148,11 +140,7 @@ function detectWindowsHypervisor(
   return { isVM: false, type: 'none', isContainer, isCI, ciName };
 }
 
-function detectMacHypervisor(
-  isCI: boolean,
-  isContainer: boolean,
-  ciName?: string,
-): HypervisorInfo {
+function detectMacHypervisor(isCI: boolean, isContainer: boolean, ciName?: string): HypervisorInfo {
   const ioreg = runCmd('ioreg -l 2>/dev/null | grep -e "Manufacturer" -e "Vendor Name"');
   const ioregLower = ioreg.stdout.toLowerCase();
 
@@ -176,11 +164,7 @@ function detectMacHypervisor(
   return { isVM: false, type: 'none', isContainer, isCI, ciName };
 }
 
-function detectLinuxHypervisor(
-  isCI: boolean,
-  isContainer: boolean,
-  ciName?: string,
-): HypervisorInfo {
+function detectLinuxHypervisor(isCI: boolean, isContainer: boolean, ciName?: string): HypervisorInfo {
   const virt = runCmd('systemd-detect-virt 2>/dev/null').stdout.toLowerCase();
 
   if (virt === 'kvm') return { isVM: true, type: 'kvm', isContainer, isCI, ciName };
@@ -195,8 +179,8 @@ function detectLinuxHypervisor(
     return { isVM: true, type: 'qemu', isContainer, isCI, ciName };
   }
 
-  const sysVendor = runCmd("cat /sys/class/dmi/id/sys_vendor 2>/dev/null").stdout.toLowerCase();
-  const productName = runCmd("cat /sys/class/dmi/id/product_name 2>/dev/null").stdout.toLowerCase();
+  const sysVendor = runCmd('cat /sys/class/dmi/id/sys_vendor 2>/dev/null').stdout.toLowerCase();
+  const productName = runCmd('cat /sys/class/dmi/id/product_name 2>/dev/null').stdout.toLowerCase();
 
   if (sysVendor.includes('microsoft') || productName.includes('virtual')) {
     return { isVM: true, type: 'hyper-v', isContainer, isCI, ciName };
@@ -246,9 +230,7 @@ function detectCPU(): CPUInfo {
   const threads = cpuList.length;
 
   if (platform() === 'win32') {
-    const r = runCmd(
-      'powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).NumberOfCores"',
-    );
+    const r = runCmd('powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).NumberOfCores"');
     const cores = parseInt(r.stdout, 10) || threads;
     return { model: model.replace(/\s+/g, ' ').trim(), cores, threads };
   }
@@ -265,15 +247,10 @@ function detectCPU(): CPUInfo {
   }
 
   const physCores = parseInt(runCmd('grep -c "^processor" /proc/cpuinfo 2>/dev/null').stdout, 10) || 0;
-  const siblings = parseInt(
-    runCmd("grep -m1 'siblings' /proc/cpuinfo 2>/dev/null | awk '{print $NF}'").stdout,
-    10,
-  ) || 0;
+  const siblings =
+    parseInt(runCmd("grep -m1 'siblings' /proc/cpuinfo 2>/dev/null | awk '{print $NF}'").stdout, 10) || 0;
   const socketCount =
-    parseInt(
-      runCmd("grep 'physical id' /proc/cpuinfo 2>/dev/null | sort -u | wc -l").stdout,
-      10,
-    ) || 1;
+    parseInt(runCmd("grep 'physical id' /proc/cpuinfo 2>/dev/null | sort -u | wc -l").stdout, 10) || 1;
 
   return {
     model: model.replace(/\s+/g, ' ').trim(),
@@ -325,13 +302,13 @@ function detectGPU(): GPUInfo[] {
     if (r.stdout) {
       try {
         const data = JSON.parse(r.stdout);
-        const displays = data['SPDisplaysDataType'] || [];
+        const displays = data.SPDisplaysDataType || [];
         for (const d of displays) {
-          const chip = d['sppci_model'] || d['sppci_vendor'] || '';
+          const chip = d.sppci_model || d.sppci_vendor || '';
           if (chip) {
             gpus.push({
               model: chip,
-              vramMB: parseInt(d['spdisplays_vram'], 10) || 0,
+              vramMB: parseInt(d.spdisplays_vram, 10) || 0,
             });
           }
         }
@@ -361,7 +338,7 @@ function detectGPU(): GPUInfo[] {
     const cudaR = runCmd('nvidia-smi 2>/dev/null');
     const cudaMatch = cudaR.stdout.match(/CUDA Version:\s*([\d.]+)/);
     return nvidiaSmi.stdout.split('\n').map((line) => {
-      const [model, memStr] = line.split(',').map((s) => s.trim());
+      const [model = '', memStr = '0'] = line.split(',').map((s) => s.trim());
       return {
         model: model || 'NVIDIA GPU',
         vramMB: parseInt(memStr, 10) || 0,
@@ -403,9 +380,9 @@ function detectDisks(): DiskInfo[] {
   if (df.stdout) {
     const lines = df.stdout.split('\n');
     if (lines.length >= 2) {
-      const parts = lines[1].split(/\s+/);
-      const totalKB = parseInt(parts[1], 10) || 0;
-      const freeKB = parseInt(parts[3], 10) || 0;
+      const parts = (lines[1] ?? '').split(/\s+/);
+      const totalKB = parseInt(parts[1] ?? '0', 10) || 0;
+      const freeKB = parseInt(parts[3] ?? '0', 10) || 0;
       disks.push({
         mountPoint: '/',
         totalGB: Math.round(totalKB / (1024 * 1024)),
@@ -447,8 +424,9 @@ function detectTool(name: string, versionArgs: string[] = ['--version']): ToolIn
     pathResult = spawnSync('which', [name], { encoding: 'utf-8', timeout: 5000 });
   }
 
-  if (pathResult.status === 0 && pathResult.stdout?.trim()) {
-    const path = pathResult.stdout.trim().split(/\r?\n/)[0].trim();
+  const pathStdout = typeof pathResult.stdout === 'string' ? pathResult.stdout : pathResult.stdout?.toString();
+  if (pathResult.status === 0 && pathStdout?.trim()) {
+    const path = (pathStdout.trim().split(/\r?\n/)[0] ?? '').trim();
     if (path && !path.startsWith('which:') && !/^(INFO|Could not find)/i.test(path)) {
       return { name, available: true, path };
     }
