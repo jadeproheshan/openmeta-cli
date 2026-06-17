@@ -1,5 +1,6 @@
 export { ContentService, contentService } from './content.js';
 export { ContributionPrService, contributionPrService } from './contribution-pr.js';
+export { FeasibilityHintService, feasibilityHintService } from './feasibility-hints.js';
 export { GitService, gitService } from './git.js';
 export { GitHubService, githubService } from './github.js';
 export { InboxService, inboxService } from './inbox.js';

@@ -3,7 +3,12 @@ import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { type SimpleGit, simpleGit } from 'simple-git';
-import type { PatchDraft, PullRequestDraft, RepositoryImprovementSuggestion } from '../contracts/index.js';
+import type {
+  IssueFeasibilityAssessment,
+  PatchDraft,
+  PullRequestDraft,
+  RepositoryImprovementSuggestion,
+} from '../contracts/index.js';
 import {
   configService,
   ensureDirectory,
@@ -128,6 +133,15 @@ interface ConcretePatchResult {
   reviewRequired: boolean;
 }
 
+interface FeasibilityPolicy {
+  assessment: IssueFeasibilityAssessment;
+  shouldStop: boolean;
+  effectiveDraftOnly: boolean;
+  effectiveLocalArtifactsOnly: boolean;
+  allowRealPr: boolean;
+  skipReasons: string[];
+}
+
 interface PresetAnalyzeCandidate {
   repoFullName: string;
   workspace: RepoWorkspaceContext;
@@ -225,6 +239,8 @@ export class AgentOrchestrator {
 
     await this.validateConfig(config);
 
+    issueRankingService.ensureEnvironment();
+
     if (headless && !schedulerRun && !dryRun && !localArtifactsOnly) {
       await this.confirmManualHeadlessRun(config);
     }
@@ -285,7 +301,7 @@ export class AgentOrchestrator {
     const presetIssueFlowAllowed =
       !issueTarget &&
       scope?.mode === 'preset' &&
-      (rankedIssues[0]?.opportunity.overallScore || 0) >= config.automation.minMatchScore;
+      issueRankingService.getAdjustedOverallScore(rankedIssues[0]) >= config.automation.minMatchScore;
     const presetQualifiedIssue = presetIssueFlowAllowed
       ? issueRankingService.selectIssueForAutomation(rankedIssues, config.automation.minMatchScore)
       : undefined;
@@ -308,6 +324,16 @@ export class AgentOrchestrator {
           selectedCandidate.suggestion,
         );
         const memory = selectedCandidate.memory;
+        const feasibilityPolicy = await this.assessExecutionFeasibility({
+          issue: syntheticIssue,
+          workspace: selectedCandidate.workspace,
+          headless,
+          draftOnly,
+          localArtifactsOnly,
+        });
+        if (feasibilityPolicy.shouldStop) {
+          throw new Error(`Selected issue is not executable on this machine: ${feasibilityPolicy.assessment.summary}`);
+        }
         const patchDraftResult = await ui.task(
           {
             title: 'Generating patch strategy',
@@ -330,7 +356,7 @@ export class AgentOrchestrator {
                 implementationWorkspace,
                 patchDraft,
                 runChecks,
-                draftOnly,
+                feasibilityPolicy.effectiveDraftOnly,
               )
             : {
                 changedFiles: [],
@@ -368,7 +394,10 @@ export class AgentOrchestrator {
           async () =>
             this.submitContributionPullRequestIfPossible({
               config,
-              allowRealPr: patchDraftResult.status === 'success' && prDraftResult.status === 'success',
+              allowRealPr:
+                feasibilityPolicy.allowRealPr &&
+                patchDraftResult.status === 'success' &&
+                prDraftResult.status === 'success',
               headless,
               issue: syntheticIssue,
               prDraft,
@@ -382,7 +411,8 @@ export class AgentOrchestrator {
           patchDraftResult.status !== 'success' || implementation.reviewRequired || prDraftResult.status !== 'success';
         const skipReasons = [
           ...(draftOnly ? ['draft_only'] : []),
-          ...(localArtifactsOnly ? ['publish_skipped_local_artifacts_only'] : []),
+          ...feasibilityPolicy.skipReasons,
+          ...(feasibilityPolicy.effectiveLocalArtifactsOnly ? ['publish_skipped_local_artifacts_only'] : []),
           ...(patchDraftResult.status !== 'success' ? ['patch_draft_requires_review'] : []),
           ...(implementation.reviewRequired ? ['implementation_requires_review'] : []),
           ...(prDraftResult.status !== 'success' ? ['pr_draft_requires_review'] : []),
@@ -442,7 +472,7 @@ export class AgentOrchestrator {
             proofMarkdown,
           });
 
-          const publishResult = localArtifactsOnly
+          const publishResult = feasibilityPolicy.effectiveLocalArtifactsOnly
             ? { published: false }
             : await ui.task(
                 {
@@ -513,15 +543,15 @@ export class AgentOrchestrator {
           artifactsWritten: !dryRun,
           executionOutcome: this.resolveMachineExecutionOutcome({
             draftOnly,
-            localArtifactsOnly,
+            localArtifactsOnly: feasibilityPolicy.effectiveLocalArtifactsOnly,
             changedFiles: implementation.changedFiles,
             prCreated: Boolean(contributionPullRequest.url),
             reviewRequired,
           }),
           executionPolicy: {
             headless,
-            draftOnly,
-            localArtifactsOnly,
+            draftOnly: feasibilityPolicy.effectiveDraftOnly,
+            localArtifactsOnly: feasibilityPolicy.effectiveLocalArtifactsOnly,
             runChecks,
             dryRun,
             refresh,
@@ -566,6 +596,16 @@ export class AgentOrchestrator {
         ),
     );
     const memory = memoryService.update(selectedIssue, workspace);
+    const feasibilityPolicy = await this.assessExecutionFeasibility({
+      issue: selectedIssue,
+      workspace,
+      headless,
+      draftOnly,
+      localArtifactsOnly,
+    });
+    if (feasibilityPolicy.shouldStop) {
+      throw new Error(`Selected issue is not executable on this machine: ${feasibilityPolicy.assessment.summary}`);
+    }
 
     const patchDraftResult = await ui.task(
       {
@@ -584,7 +624,13 @@ export class AgentOrchestrator {
     const implementationWorkspace = this.buildImplementationWorkspace(workspace, patchDraft);
     const implementation =
       patchDraftResult.status === 'success'
-        ? await this.generateConcretePatch(selectedIssue, implementationWorkspace, patchDraft, runChecks, draftOnly)
+        ? await this.generateConcretePatch(
+            selectedIssue,
+            implementationWorkspace,
+            patchDraft,
+            runChecks,
+            feasibilityPolicy.effectiveDraftOnly,
+          )
         : {
             changedFiles: [],
             validationResults: implementationWorkspace.testResults,
@@ -624,7 +670,10 @@ export class AgentOrchestrator {
       async () =>
         this.submitContributionPullRequestIfPossible({
           config,
-          allowRealPr: patchDraftResult.status === 'success' && prDraftResult.status === 'success',
+          allowRealPr:
+            feasibilityPolicy.allowRealPr &&
+            patchDraftResult.status === 'success' &&
+            prDraftResult.status === 'success',
           headless,
           issue: selectedIssue,
           prDraft,
@@ -639,7 +688,8 @@ export class AgentOrchestrator {
       patchDraftResult.status !== 'success' || implementation.reviewRequired || prDraftResult.status !== 'success';
     const skipReasons = [
       ...(draftOnly ? ['draft_only'] : []),
-      ...(localArtifactsOnly ? ['publish_skipped_local_artifacts_only'] : []),
+      ...feasibilityPolicy.skipReasons,
+      ...(feasibilityPolicy.effectiveLocalArtifactsOnly ? ['publish_skipped_local_artifacts_only'] : []),
       ...(patchDraftResult.status !== 'success' ? ['patch_draft_requires_review'] : []),
       ...(implementation.reviewRequired ? ['implementation_requires_review'] : []),
       ...(prDraftResult.status !== 'success' ? ['pr_draft_requires_review'] : []),
@@ -699,7 +749,7 @@ export class AgentOrchestrator {
         proofMarkdown,
       });
 
-      const publishResult = localArtifactsOnly
+      const publishResult = feasibilityPolicy.effectiveLocalArtifactsOnly
         ? { published: false }
         : await ui.task(
             {
@@ -770,15 +820,15 @@ export class AgentOrchestrator {
       artifactsWritten: !dryRun,
       executionOutcome: this.resolveMachineExecutionOutcome({
         draftOnly,
-        localArtifactsOnly,
+        localArtifactsOnly: feasibilityPolicy.effectiveLocalArtifactsOnly,
         changedFiles: implementation.changedFiles,
         prCreated: Boolean(contributionPullRequest.url),
         reviewRequired,
       }),
       executionPolicy: {
         headless,
-        draftOnly,
-        localArtifactsOnly,
+        draftOnly: feasibilityPolicy.effectiveDraftOnly,
+        localArtifactsOnly: feasibilityPolicy.effectiveLocalArtifactsOnly,
         runChecks,
         dryRun,
         refresh,
@@ -855,6 +905,9 @@ export class AgentOrchestrator {
 
     await this.validateConfig(config);
 
+    // Kick off background environment detection early; do not block the main flow
+    issueRankingService.ensureEnvironment();
+
     if (headless && !schedulerRun && !localArtifactsOnly) {
       await this.confirmManualHeadlessRun(config);
     }
@@ -916,7 +969,7 @@ export class AgentOrchestrator {
     const presetIssueFlowAllowed =
       !issueTarget &&
       scope?.mode === 'preset' &&
-      (rankedIssues[0]?.opportunity.overallScore || 0) >= config.automation.minMatchScore;
+      issueRankingService.getAdjustedOverallScore(rankedIssues[0]) >= config.automation.minMatchScore;
     const presetQualifiedIssue = presetIssueFlowAllowed
       ? issueRankingService.selectIssueForAutomation(rankedIssues, config.automation.minMatchScore)
       : undefined;
@@ -980,6 +1033,23 @@ export class AgentOrchestrator {
     const memory = memoryService.update(selectedIssue, workspace);
     completedStages.add('prepare');
     this.showWorkspaceSummary(workspace, memory);
+    const feasibilityPolicy = await this.assessExecutionFeasibility({
+      issue: selectedIssue,
+      workspace,
+      headless,
+      draftOnly,
+      localArtifactsOnly,
+    });
+    if (feasibilityPolicy.shouldStop) {
+      completedStages.add('draft');
+      this.renderAgentStage(
+        'draft',
+        completedStages,
+        `Execution stopped before patch generation: ${feasibilityPolicy.assessment.summary}`,
+        true,
+      );
+      return;
+    }
 
     this.renderAgentStage(
       'draft',
@@ -1007,7 +1077,13 @@ export class AgentOrchestrator {
     const implementationWorkspace = this.buildImplementationWorkspace(workspace, patchDraft);
     const implementation =
       patchDraftResult.status === 'success'
-        ? await this.generateConcretePatch(selectedIssue, implementationWorkspace, patchDraft, runChecks, draftOnly)
+        ? await this.generateConcretePatch(
+            selectedIssue,
+            implementationWorkspace,
+            patchDraft,
+            runChecks,
+            feasibilityPolicy.effectiveDraftOnly,
+          )
         : {
             changedFiles: [],
             validationResults: implementationWorkspace.testResults,
@@ -1051,7 +1127,8 @@ export class AgentOrchestrator {
 
     const contributionPullRequest = await this.submitContributionPullRequestIfPossible({
       config,
-      allowRealPr: patchDraftResult.status === 'success' && prDraftResult.status === 'success',
+      allowRealPr:
+        feasibilityPolicy.allowRealPr && patchDraftResult.status === 'success' && prDraftResult.status === 'success',
       headless,
       issue: selectedIssue,
       prDraft,
@@ -1141,7 +1218,7 @@ export class AgentOrchestrator {
       },
     );
 
-    const publishResult = localArtifactsOnly
+    const publishResult = feasibilityPolicy.effectiveLocalArtifactsOnly
       ? { published: false }
       : await this.publishArtifactsIfNeeded({
           config,
@@ -1496,20 +1573,29 @@ export class AgentOrchestrator {
       title,
       issues.map((issue, index) => {
         const bodyExcerpt = issue.body.replace(/\s+/g, ' ').trim().slice(0, 180);
+        const hint = issue.scoutFeasibility;
 
         return {
           title: `${index + 1}. ${issue.repoFullName}#${issue.number}`,
           subtitle: issue.title,
           meta: [
+            ...(hint ? [`adjusted ${hint.adjustedOverallScore}`] : []),
             `overall ${issue.opportunity.overallScore}`,
             `match ${issue.matchScore}`,
             `opportunity ${issue.opportunity.score}`,
+            ...(hint ? [`feasibility ${hint.level}`] : []),
             `stars ${issue.repoStars}`,
           ],
           lines: [
             `Labels: ${issue.labels.join(', ') || 'none'}`,
             `Tech: ${issue.analysis.techRequirements.join(', ') || 'n/a'}`,
             `Workload: ${issue.analysis.estimatedWorkload || 'n/a'}`,
+            ...(hint
+              ? [
+                  `Feasibility: ${hint.level} (${hint.issueScope}, ${hint.scoreAdjustment >= 0 ? '+' : ''}${hint.scoreAdjustment})`,
+                  `Feasibility note: ${hint.explanation}`,
+                ]
+              : []),
             `Updated: ${this.formatDate(issue.updatedAt)} | Created: ${this.formatDate(issue.createdAt)}`,
             `Summary: ${issue.opportunity.summary}`,
             ...(bodyExcerpt ? [`Issue: ${bodyExcerpt}`] : []),
@@ -1529,6 +1615,11 @@ export class AgentOrchestrator {
       lines: [
         `Repository: ${issue.repoFullName}`,
         `Summary: ${issue.opportunity.summary}`,
+        ...(issue.scoutFeasibility
+          ? [
+              `Scout feasibility: ${issue.scoutFeasibility.level} (${issue.scoutFeasibility.issueScope}, adjusted ${issue.scoutFeasibility.adjustedOverallScore})`,
+            ]
+          : []),
         `Demand: ${issue.analysis.coreDemand || 'n/a'}`,
         `Link: ${issue.htmlUrl}`,
       ],
@@ -1537,6 +1628,9 @@ export class AgentOrchestrator {
 
     ui.stats('Selected issue metrics', [
       { label: 'Overall', value: String(issue.opportunity.overallScore), tone: 'success' },
+      ...(issue.scoutFeasibility
+        ? [{ label: 'Adjusted', value: String(issue.scoutFeasibility.adjustedOverallScore), tone: 'warning' as const }]
+        : []),
       { label: 'Match', value: String(issue.matchScore), tone: 'info' },
       { label: 'Opportunity', value: String(issue.opportunity.score), tone: 'accent' },
       { label: 'Stars', value: String(issue.repoStars), tone: 'info' },
@@ -1860,7 +1954,10 @@ export class AgentOrchestrator {
       for (const issue of issues) {
         const key = `${issue.repoFullName}#${issue.number}`;
         const existing = issueMap.get(key);
-        if (!existing || issue.opportunity.overallScore > existing.opportunity.overallScore) {
+        if (
+          !existing ||
+          issueRankingService.getAdjustedOverallScore(issue) > issueRankingService.getAdjustedOverallScore(existing)
+        ) {
           issueMap.set(key, issue);
         }
       }
@@ -1868,6 +1965,7 @@ export class AgentOrchestrator {
 
     return [...issueMap.values()].sort(
       (left, right) =>
+        issueRankingService.getAdjustedOverallScore(right) - issueRankingService.getAdjustedOverallScore(left) ||
         right.opportunity.overallScore - left.opportunity.overallScore ||
         right.matchScore - left.matchScore ||
         right.updatedAt.localeCompare(left.updatedAt),
@@ -1908,6 +2006,23 @@ export class AgentOrchestrator {
     this.renderAgentStage('prepare', completedStages, `Cloning and inspecting ${selectedIssue.repoFullName}.`);
     completedStages.add('prepare');
     this.showWorkspaceSummary(selectedCandidate.workspace, memory);
+    const feasibilityPolicy = await this.assessExecutionFeasibility({
+      issue: selectedIssue,
+      workspace: selectedCandidate.workspace,
+      headless: input.headless,
+      draftOnly: input.draftOnly,
+      localArtifactsOnly: Boolean(input.options.localArtifactsOnly),
+    });
+    if (feasibilityPolicy.shouldStop) {
+      completedStages.add('draft');
+      this.renderAgentStage(
+        'draft',
+        completedStages,
+        `Execution stopped before patch generation: ${feasibilityPolicy.assessment.summary}`,
+        true,
+      );
+      return;
+    }
 
     this.renderAgentStage(
       'draft',
@@ -1940,7 +2055,7 @@ export class AgentOrchestrator {
             implementationWorkspace,
             patchDraft,
             input.runChecks,
-            input.draftOnly,
+            feasibilityPolicy.effectiveDraftOnly,
           )
         : {
             changedFiles: [],
@@ -1985,7 +2100,8 @@ export class AgentOrchestrator {
 
     const contributionPullRequest = await this.submitContributionPullRequestIfPossible({
       config: input.config,
-      allowRealPr: patchDraftResult.status === 'success' && prDraftResult.status === 'success',
+      allowRealPr:
+        feasibilityPolicy.allowRealPr && patchDraftResult.status === 'success' && prDraftResult.status === 'success',
       headless: input.headless,
       issue: selectedIssue,
       prDraft,
@@ -2075,7 +2191,7 @@ export class AgentOrchestrator {
       },
     );
 
-    const publishResult = Boolean(input.options.localArtifactsOnly)
+    const publishResult = feasibilityPolicy.effectiveLocalArtifactsOnly
       ? { published: false }
       : await this.publishArtifactsIfNeeded({
           config: input.config,
@@ -2363,6 +2479,99 @@ export class AgentOrchestrator {
 
   private uniqueStrings(values: string[]): string[] {
     return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  }
+
+  private async assessExecutionFeasibility(input: {
+    issue: RankedIssue;
+    workspace: RepoWorkspaceContext;
+    headless: boolean;
+    draftOnly: boolean;
+    localArtifactsOnly: boolean;
+  }): Promise<FeasibilityPolicy> {
+    const environment = await issueRankingService.ensureEnvironment();
+    const assessmentResult = await ui.task(
+      {
+        title: 'Assessing local execution feasibility',
+        doneMessage: 'Execution feasibility assessed',
+        failedMessage: 'Execution feasibility assessment failed',
+        tone: 'info',
+      },
+      async () => llmService.assessIssueFeasibility(input.issue, input.workspace, environment),
+    );
+    const assessment = assessmentResult.data;
+    const shouldStop =
+      assessment.decision === 'stop_hard_blocked' || assessment.decision === 'stop_user_action_required';
+    const constrainedExecution =
+      assessmentResult.status !== 'success' ||
+      assessment.decision === 'repair_then_proceed' ||
+      assessment.decision === 'proceed_static_only' ||
+      assessment.decision === 'proceed_partial_validation';
+    const effectiveDraftOnly = input.draftOnly || constrainedExecution;
+    const effectiveLocalArtifactsOnly = input.localArtifactsOnly || constrainedExecution || shouldStop;
+    const allowRealPr = !shouldStop && !constrainedExecution;
+    const skipReasons = [
+      ...(assessmentResult.status !== 'success' ? ['feasibility_requires_review'] : []),
+      ...(assessment.decision === 'repair_then_proceed' ? ['feasibility_repair_required'] : []),
+      ...(assessment.decision === 'proceed_static_only' ? ['feasibility_static_only'] : []),
+      ...(assessment.decision === 'proceed_partial_validation' ? ['feasibility_partial_validation'] : []),
+      ...(assessment.decision === 'stop_hard_blocked' ? ['feasibility_hard_blocked'] : []),
+      ...(assessment.decision === 'stop_user_action_required' ? ['feasibility_user_action_required'] : []),
+    ];
+
+    this.showFeasibilityAssessment(assessment, {
+      constrainedExecution,
+      shouldStop,
+      headless: input.headless,
+    });
+
+    return {
+      assessment,
+      shouldStop,
+      effectiveDraftOnly,
+      effectiveLocalArtifactsOnly,
+      allowRealPr,
+      skipReasons,
+    };
+  }
+
+  private showFeasibilityAssessment(
+    assessment: IssueFeasibilityAssessment,
+    options: { constrainedExecution: boolean; shouldStop: boolean; headless: boolean },
+  ): void {
+    const blockingGaps = assessment.gaps
+      .filter((gap) => gap.severity === 'blocking')
+      .map((gap) => `${gap.description}${gap.suggestedAction ? ` (${gap.suggestedAction})` : ''}`);
+    const warningGaps = assessment.gaps
+      .filter((gap) => gap.severity !== 'blocking')
+      .slice(0, 3)
+      .map((gap) => `${gap.description}${gap.suggestedAction ? ` (${gap.suggestedAction})` : ''}`);
+    const lines = [
+      `Decision: ${assessment.decision}`,
+      `Execution mode: ${assessment.executionMode}`,
+      `Confidence: ${assessment.confidence}`,
+      ...(blockingGaps.length > 0 ? blockingGaps : warningGaps),
+    ];
+
+    if (options.shouldStop) {
+      ui.callout({
+        label: 'OpenMeta Agent',
+        title: 'Issue is not executable on this machine yet',
+        subtitle: assessment.summary,
+        lines,
+        tone: 'warning',
+      });
+      return;
+    }
+
+    if (options.constrainedExecution) {
+      ui.callout({
+        label: 'OpenMeta Agent',
+        title: options.headless ? 'Execution constrained for unattended safety' : 'Execution will be constrained',
+        subtitle: 'OpenMeta will keep this run in review-oriented artifact mode until the feasibility gap is resolved.',
+        lines,
+        tone: 'warning',
+      });
+    }
   }
 
   private async generateConcretePatch(

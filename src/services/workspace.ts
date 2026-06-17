@@ -514,7 +514,7 @@ export class WorkspaceService {
           continue;
         }
 
-        files.push(relative(root, join(current, entry.name)));
+        files.push(relative(root, join(current, entry.name)).replace(/\\/g, '/'));
         if (files.length >= MAX_DISCOVERED_FILES) {
           break;
         }
