@@ -264,8 +264,8 @@ export class IssueRankingService {
     }
   }
 
-  private getAdjustedOverallScore(issue: RankedIssue): number {
-    return issue.scoutFeasibility?.adjustedOverallScore ?? issue.opportunity.overallScore;
+  getAdjustedOverallScore(issue: RankedIssue | undefined): number {
+    return issue?.scoutFeasibility?.adjustedOverallScore ?? issue?.opportunity.overallScore ?? 0;
   }
 
   private scoreIssueForProfile(issue: GitHubIssue, userProfile: AppConfig['userProfile']): number {
